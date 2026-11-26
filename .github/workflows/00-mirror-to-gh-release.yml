@@ -1,0 +1,178 @@
+name: "00 - Mirror Neo 11 Source (ModelScope -> GitHub Private Release)"
+
+on:
+  workflow_dispatch:
+    inputs:
+      release_tag:
+        description: "Release tag to create/update in your private GitHub storage repo"
+        required: true
+        default: "neo11-17.1.15.2"
+      source_override:
+        description: "Optional ms:// source override (leave empty to use secret PORT_ROM_SOURCE)"
+        required: false
+        default: ""
+
+permissions:
+  contents: read
+
+jobs:
+  mirror:
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Free runner disk space
+        run: |
+          chmod +x scripts/*.sh scripts/*.py
+          bash scripts/00_clean_runner_disk.sh
+
+      - name: Install modelscope-hub SDK
+        run: |
+          python3 -m pip install --break-system-packages -q "modelscope-hub>=0.5.0"
+
+      - name: Download 6 chunks from ModelScope in parallel & upload to Private GitHub Release
+        env:
+          MS_SOURCE_INPUT: ${{ inputs.source_override }}
+          PORT_ROM_SOURCE: ${{ secrets.PORT_ROM_SOURCE }}
+          MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
+          STORAGE_GH_TOKEN: ${{ secrets.STORAGE_GH_TOKEN }}
+          STORAGE_GH_REPO: ${{ secrets.STORAGE_GH_REPO }}
+          RELEASE_TAG: ${{ inputs.release_tag }}
+        run: |
+          set -euo pipefail
+          SRC="${MS_SOURCE_INPUT:-$PORT_ROM_SOURCE}"
+          if [[ "$SRC" != ms://* ]]; then
+            echo "[FATAL] Source must be a ms://...parts.json URI (got non-ms scheme)."
+            exit 1
+          fi
+          if [[ -z "${MODELSCOPE_API_TOKEN:-}" ]]; then
+            echo "[FATAL] Secret MODELSCOPE_API_TOKEN is required."
+            exit 1
+          fi
+          if [[ -z "${STORAGE_GH_TOKEN:-}" || -z "${STORAGE_GH_REPO:-}" ]]; then
+            echo "[FATAL] Secrets STORAGE_GH_TOKEN and STORAGE_GH_REPO (e.g. yourname/k90-rom-storage) are required."
+            exit 1
+          fi
+
+          # Mask sensitive storage repo name in public workflow logs
+          echo "::add-mask::$STORAGE_GH_REPO"
+
+          # 2-second pre-flight check BEFORE spending ~20 min downloading from ModelScope!
+          export GH_TOKEN="$STORAGE_GH_TOKEN"
+          echo "[Pre-flight] Verifying GitHub private storage repo & release write permission..."
+          if ! gh release view "$RELEASE_TAG" --repo "$STORAGE_GH_REPO" >/dev/null 2>&1; then
+            if ! gh release create "$RELEASE_TAG" \
+              --repo "$STORAGE_GH_REPO" \
+              --title "iQOO Neo 11 OriginOS 7 Source ($RELEASE_TAG)" \
+              --notes "Mirrored chunked source ROM for fast GitHub Actions internal builds."; then
+              echo "[FATAL] Failed to create Release '$RELEASE_TAG' in private storage repo!"
+              echo "  Please verify:"
+              echo "  1. STORAGE_GH_REPO exists and is NOT empty (initialize with a README file!)."
+              echo "  2. STORAGE_GH_TOKEN has 'Contents: Read and write' permission on that repo."
+              exit 1
+            fi
+          fi
+          echo "[Pre-flight] OK! Target Release '$RELEASE_TAG' is ready to receive assets."
+
+          MIRROR_DIR="$WORK_ROOT/mirror_assets"
+          CACHE_DIR="$WORK_ROOT/ms_cache"
+          mkdir -p "$MIRROR_DIR" "$CACHE_DIR"
+
+          python3 - "$SRC" "$MIRROR_DIR" "$CACHE_DIR" "$WORK_ROOT/manifest_name.txt" <<'PYEOF'
+import concurrent.futures, hashlib, json, os, shutil, sys, time
+from modelscope_hub import HubApi
+
+src, mirror_dir, cache_dir, manifest_out = sys.argv[1:5]
+rest = src[len("ms://"):]
+parts_split = rest.split("/", 2)
+if len(parts_split) < 3:
+    raise SystemExit("Invalid ms:// URI, expected ms://<owner>/<dataset>/<path>")
+repo_id = f"{parts_split[0]}/{parts_split[1]}"
+file_path = parts_split[2]
+if not file_path.endswith(".parts.json"):
+    raise SystemExit("Expected a .parts.json chunked manifest on ModelScope!")
+
+token = os.environ["MODELSCOPE_API_TOKEN"]
+endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or "https://modelscope.cn"
+api = HubApi(token=token, endpoint=endpoint)
+
+print(f"[Mirror] Fetching manifest {os.path.basename(file_path)} ...", file=sys.stderr, flush=True)
+m_local = str(api.download_file(repo_id, "dataset", file_path, revision="master", local_dir=cache_dir))
+manifest_name = os.path.basename(file_path)
+shutil.copy2(m_local, os.path.join(mirror_dir, manifest_name))
+
+with open(m_local, "r", encoding="utf-8") as f:
+    meta = json.load(f)
+
+chunk_list = meta["parts"]
+remote_dir = os.path.dirname(file_path)
+workers = min(6, len(chunk_list))
+print(f"[Mirror] Downloading {len(chunk_list)} chunks in parallel (workers={workers})...", file=sys.stderr, flush=True)
+
+def dl_one(idx_part):
+    idx, p = idx_part
+    fname = p.get("name") or p.get("filename")
+    candidates = [f"parts/{fname}"]
+    if remote_dir:
+        candidates.append(f"{remote_dir}/{fname}")
+    candidates.append(fname)
+
+    for attempt in range(1, 5):
+        local_api = HubApi(token=token, endpoint=endpoint)
+        last_err = None
+        for rpath in candidates:
+            try:
+                t0 = time.time()
+                print(f"  [{idx}/{len(chunk_list)}] Downloading {fname} (attempt {attempt})...", file=sys.stderr, flush=True)
+                lp = str(local_api.download_file(repo_id, "dataset", rpath, revision="master", local_dir=cache_dir))
+                h = hashlib.sha256()
+                with open(lp, "rb") as fp:
+                    for blk in iter(lambda: fp.read(8 * 1024 * 1024), b""):
+                        h.update(blk)
+                if h.hexdigest() != p["sha256"]:
+                    raise RuntimeError(f"SHA256 mismatch on {fname}")
+                dst = os.path.join(mirror_dir, fname)
+                shutil.move(lp, dst)
+                dt = max(time.time() - t0, 0.1)
+                sz_mb = os.path.getsize(dst) / (1024 * 1024)
+                print(f"  [{idx}/{len(chunk_list)}] Verified {fname} ({sz_mb:.1f} MiB in {dt:.1f}s)", file=sys.stderr, flush=True)
+                return fname
+            except Exception as e:
+                last_err = e
+                continue
+        print(f"  [WARN] {fname} attempt {attempt}/4 failed: {last_err}", file=sys.stderr, flush=True)
+        if attempt == 4:
+            raise last_err
+        time.sleep(attempt * 5)
+
+with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
+    futs = [ex.submit(dl_one, (i, p)) for i, p in enumerate(chunk_list, 1)]
+    for fut in concurrent.futures.as_completed(futs):
+        fut.result()
+
+with open(manifest_out, "w", encoding="utf-8") as mf:
+    mf.write(manifest_name + "\n")
+PYEOF
+          MANIFEST_NAME="$(tr -d '\r\n' < "$WORK_ROOT/manifest_name.txt")"
+
+          echo "[Mirror] Uploading assets to Private GitHub Release (internal GitHub backbone speed)..."
+          export GH_TOKEN="$STORAGE_GH_TOKEN"
+          for f in "$MIRROR_DIR"/*; do
+            echo "  -> Uploading $(basename "$f") ($(du -h "$f" | awk '{print $1}'))..."
+            gh release upload "$RELEASE_TAG" "$f" --repo "$STORAGE_GH_REPO" --clobber
+          done
+
+          {
+            echo "## Mirror Complete!"
+            echo "- Release tag: \`$RELEASE_TAG\`"
+            echo "- Manifest asset: \`$MANIFEST_NAME\`"
+            echo ""
+            echo "### Next Step: Switch \`PORT_ROM_SOURCE\` Secret to Fast Internal Source"
+            echo "Update repository secret \`PORT_ROM_SOURCE\` to:"
+            echo "\`\`\`text"
+            echo "gh-release://<你的私有仓库owner>/<私有仓库名>/$RELEASE_TAG/$MANIFEST_NAME"
+            echo "\`\`\`"
+            echo "Future Stage 2 builds will now pull all 10 GB in ~20 seconds!"
+          } >> "$GITHUB_STEP_SUMMARY"

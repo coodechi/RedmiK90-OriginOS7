@@ -1,0 +1,28 @@
+# ==============================================================================
+# Debloat & Hardware-Conflict Removal List for OriginOS 7 (PD2520 -> annibale)
+#
+# Paths are relative to each partition's mounted root:
+#   - For SAR system.img: Android /system/... is under system/...
+#   - Suffix "/*" clears directory contents while keeping the empty directory
+#     (safer when system services scan a directory).
+# ==============================================================================
+
+[system]
+# --- 1. Preinstalled 3rd-party bloatware (~2,262 MiB recovered!) ---
+system/custom/app/*
+
+# --- 2. Neo 11 hardware-specific / conflicting vivo packages ---
+# Expects missing vendor.vivo.hardware.vivoalgoservice HAL on K90
+system/app/Vivo3rdAlgoService
+# Expects missing vendor.vivo.hardware.vibrator_{ext,pro,hall} HALs on K90
+system/app/vibrator4d
+
+# --- 3. Prevent accidental vivo OTA updates on REDMI K90 ---
+system/app/Updater
+system/app/COTA
+
+[product]
+# Keep product clean and intact for v1 bring-up (only 389 MiB total)
+
+[system_ext]
+# Keep system_ext intact for v1 bring-up (only 205 MiB total)

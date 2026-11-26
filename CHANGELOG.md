@@ -103,21 +103,78 @@
     - 新增 **`gh-release://<owner>/<repo>/<tag>/<asset>`** 协议支持（自动兼容 `.parts.json` 分卷并行下载与 SHA256 校验），便于后续把源包转存到 GitHub 私有 Release 实现 **~20 秒内网秒拉**。
   - 将 [`.github/workflows/01-inspect-roms.yml`](.github/workflows/01-inspect-roms.yml) 的 `timeout-minutes` 提高至 `180`，并注入 `STORAGE_GH_TOKEN` / `GITHUB_TOKEN`。
 
+#### Step 10：阶段一云端双包深度体检完成，实测结论全面落盘
+- **执行结果**：`01 - Inspect K90 & Neo 11 ROMs` 全流程成功，已将完整体检报告 `k90-neo11-inspection-report`（235 份清单/VINTF/Prop/fstab/空间数据）拉回本地分析。
+- **核心兼容性结论（高度乐观）**：
+  1. **Treble / VINTF / SEPolicy 完美对齐**：K90 `vendor`/`odm` 为 `target-level="202404"`（Android 15 GRF / SDK 35，`sepolicy=202404`）；Neo 11 `system` 完整内置 `compatibility_matrix.202404.xml` 与 `system-sdk 29~37`，且 K90 `vendor/compatibility_matrix.xml` 要求的 3 项框架 HAL Neo 11 全部原生提供；Android 17 VINTF v9.0 矩阵默认省略 `optional`（全可缺省），不会因缺失 vivo 私有 HAL 硬阻断开机。
+  2. **底层硬件 HAL 高度一致**：同为 `SM8750`（`sun`），K90 原厂已提供全套标准 AIDL HAL（`biometrics.fingerprint` v4 高通 QFP 超声波、`biometrics.face` v4、`camera.provider` v2 `vendor_qti/0`、`graphics.composer3` v3、`audio.core`/`effect`、`vibrator` `qcom-haptics`、`radio.*`、`wifi`/`bluetooth`/`sensors`/`gnss`），甚至 **两机 NFC 芯片型号完全一致（均为 NXP `SN220` / `SN220T`）**；且两机均内置 **`tango` 32 位二进制转译器**，64-bit-only `vendor` 下 32 位应用可原生兼容。
+  3. **EROFS 格式完全一致**：双机全部分区均为 `4096B` 块、`lz4_0padding`、`sb_csum mtime xattr_filter`（Linux 5.4+ 兼容），打包直接用 `mkfs.erofs -zlz4hc,9` 即可原生挂载。
+  4. **K90 实测屏幕与超声波指纹几何参数**：
+     - 屏幕分辨率与密度：`1156×2510`、`480 dpi`（`persist.sys.miui_resolution=1156,2510,480`，与 Neo 11 默认 `ro.sf.lcd_density=480` 一致）；
+     - 屏下超声波指纹坐标：`X_Y=504,1831`，`size=148×148`，`us.target=495,1814,660,1995`；
+     - 显示配置文件：`/vendor/etc/displayconfig/` 下 4 份随底包保留，另需把 K90 `/product/etc/displayconfig/display_id_4630947238302509459.xml` 迁入移植 `product`。
+- **提前捕获的 5 个关键踩坑点（将在阶段二构建脚本中逐一处理）**：
+  1. **容量问题彻底有解**：Neo 11 `/system/custom/app` 独占 **`2,262 MiB`**（`/system/custom/priv-app` 另占 `190 MiB`），仅清理 `/system/custom/app` 预装第三方包即可立省 **~2.26 GiB**，叠加清空无用的 `mi_ext_a`（省 `163 MiB`），最终 `super` 总占用约 **`11.3~11.6 GiB` < `12.49 GiB`**，留有 ~1 GiB 安全余量。
+  2. **防 K90 `mi_ext` Overlay 劫持**：K90 `vendor/etc/fstab.qcom` 会将 `mi_ext` 以 `overlay` 叠挂到 `/system/app`、`/system/priv-app`、`/product/overlay`、`/system/etc/permissions`（均带 `nofail`）。打包 `super.img` 时必须把 `mi_ext_a` / `mi_product_a` 替换为空 EROFS 镜像，防止小米残留包污染 OriginOS。
+  3. **补齐 `/oem` 与 `/vgc` 虚拟目录**：Neo 11 `system/build.prop` 尾部执行 `import /oem/oem.prop` 与 `import /vgc/vgc.prop`，但 K90 `fstab.qcom` 无独立 `oem`/`vgc` 分区；由于 SAR 架构下 `system.img` 根目录即 `/`，且内部已预建 `/oem` 与 `/vgc` 目录，只需将 `vgc_V000_PD2520MA.zip` 与 `oem_PD2520_ALL_IN_ONE_02.zip`（选用 `PD2520_CN-ZH_FULL_SC_NULL` 全网通公开版）解包灌入 `system` 根下的 `/vgc` 与 `/oem` 目录即可原生生效。
+  4. **禁用 Neo 11 Q2 独显/144Hz 私有属性并校准 Codec2**：清除 `persist.vivo.displayic.*`（`iQOO0301` Q2 独显）与 `persist.sys.private_fps=144`（对齐 K90 120Hz），并将 `debug.stagefright.ccodec` 由 `1` 对齐 K90 `vendor` 的 `4`（AIDL Codec2）。
+  5. **首版调试直连保障**：在首版 `system/build.prop` 放行早期 ADB 调试（`ro.adb.secure=0`、`persist.sys.usb.config=mtp,adb`），且保留 `JoviIme` 输入法防止精简后无键盘可用；EROFS 重打包全程严格保留原文件 UID/GID、mode、`security.selinux` 与 `security.capability` 扩展属性。
+
+#### Step 11：阶段二云端构包全套代码 + 一次性 GitHub Release 极速中转 Workflow 落盘
+- **新增设备配置与补丁规则**：
+  - [`config/device_annibale.env`](config/device_annibale.env)：锁定 K90 `super` 动态组上限（`13,411,287,040 B`）、原厂保留分区字节数（`4,132,216,832 B`）、`64 MiB` 安全裕量、K90 `product` 显示配置 XML 路径与 Neo 11 零售版 OEM 变体（`PD2520_CN-ZH_FULL_SC_NULL`）。
+  - [`config/remove_list.txt`](config/remove_list.txt)：清理 `/system/custom/app/*`（立省 ~2.26 GiB）、移除冲突包 `Vivo3rdAlgoService`、`vibrator4d` 与防误更 `Updater`/`COTA`。
+  - [`config/prop_override.conf`](config/prop_override.conf)：剔除 Q2 独显与 144Hz 私有属性，校准 Codec2 AIDL（`debug.stagefright.ccodec=4`）、基带网络制式（`33,33`）、120Hz / 480dpi，并提供首版 `debug_adb` 早期免授权调试与禁 RescueParty 规则。
+- **新增核心构建、无损 EROFS 与云端传输脚本**：
+  - [`scripts/erofs_repack.py`](scripts/erofs_repack.py)：无损复制挂载的 EROFS 分区（完整保留 UID/GID、mode、硬链接、`security.selinux`、`security.capability`），提供缺失标签自动修复与打包后回挂载校验门禁（要求 `≥99.9%` SELinux 标签覆盖率）。
+  - [`scripts/patch_props.py`](scripts/patch_props.py)：原地修改 `build.prop` 并保留原文件权限与 SELinux xattr。
+  - [`scripts/03_patch_port.sh`](scripts/03_patch_port.sh)：阶段二主构建脚本（支持 `full` 首次全套分区包与 `system_only` 极速单分区迭代模式）；自动将 Neo 11 `/vgc` 与扁平化后的 `/oem/oem.prop` 灌入 SAR `system` 根，迁入 K90 `display_id_4630947238302509459.xml`，生成防劫持空 `mi_ext.img`/`mi_product.img`，执行 `super` 容量硬门禁校验，并内置生成带 SHA256 自检、设备校验与安全先缩后刷逻辑的 macOS `fastbootd` 刷机脚本 `flash_port_mac.sh`。
+  - [`scripts/05_upload_ms.sh`](scripts/05_upload_ms.sh) & [`scripts/local_download_ms.sh`](scripts/local_download_ms.sh)：云端 `zstd` 压缩并自动 `2000 MiB` 分卷 + SHA256 清单回传魔搭私有数据集；macOS 本地一行命令 6 路并发拉回、校验合并并解压。
+- **新增两条 GitHub Actions Workflows**：
+  - [`.github/workflows/00-mirror-to-gh-release.yml`](.github/workflows/00-mirror-to-gh-release.yml)：一次性把魔搭 6 个源包分卷云端中转到私有 GitHub 仓库 Release，后续所有阶段二构包拉 10 GB 源包可从 ~20 分钟缩短至 **~20 秒**。
+  - [`.github/workflows/02-build-port.yml`](.github/workflows/02-build-port.yml)：阶段二正式云端构包 Workflow，输出 `fastbootd` 独立分区刷机包至魔搭，并产出轻量 `k90-originos7-build-report` Artifact（含容量表、SELinux 回检日志、`/system/custom/app` 实际清单、vivo `init.rc` 原始片段与 `flash_port_mac.sh` 副本）。
+- **`.gitignore` 补充**：忽略 `k90-neo11-inspection-report/`，避免将 235 份本地解压的体检原始文件推入公开仓库。
+
+#### Step 12：开机链路深度防变砖审计——新增实机级 `secilc` 跨厂 SEPolicy 编译门禁与 4 项加固
+- **排查出的 4 项潜在开不了机隐患及修复**：
+  1. **跨厂 SEPolicy 合并编译崩溃风险（最致命隐患）**：Android `init` 二阶段会用 `/system/bin/secilc` 将 Neo 11（`system`+`system_ext`+`product`）与 K90（`vendor`+`odm`）的 `.cil` 策略合编；若 K90 `vendor_sepolicy.cil` / `odm_sepolicy.cil` 引用了小米私有平台类型而 Neo 11 缺失，`secilc` 报错会令 `init` 在 `adbd` 启动前直接重启。
+     - **加固**：新增 [`scripts/check_sepolicy.py`](scripts/check_sepolicy.py)，并在 [`scripts/03_patch_port.sh`](scripts/03_patch_port.sh) 与 [`.github/workflows/02-build-port.yml`](.github/workflows/02-build-port.yml) 中接入真实 `secilc -m -M true -G -N -c 30` 预演门禁——从 K90 底包提取真实 `vendor`/`odm` SELinux CIL，与 Neo 11 策略联合试编；若发现 K90 `vendor`/`odm` 依赖的小米缺失类型/属性，自动向 `mapping/202404.cil` 注入最小兼容声明并复测至 `secilc` 退出码 `0`，所有补丁明细输出至 `sepolicy_check.txt`。
+  2. **`fastbootd` 缩容保留原分区组**：将 `flash_port_mac.sh` 中对旧分区先删后建（`delete`+`create` 可能落入 `default` 分区组）升级为优先执行 `fastboot resize-logical-partition "${p}_${SLOT}" 0`，完整保留 K90 原生 `qti_dynamic_partitions_${SLOT}` 组元数据。
+  3. **`/adb_keys` SELinux 扩展属性尾空字节一致化**：移除 `setfattr` 调用，统一改用 Python `os.setxattr` 写入带 `\x00` 结尾的原生 EROFS SELinux 标签。
+  4. **高危 `init.rc` 审计**：在构建报告中自动输出 `neo11_critical_rc_audit.txt`，抓取 Neo 11 `/system/etc/init/` 中所有 `critical`/`reboot`/`mount` 声明以及 `securemount.rc`、`/vgc/vgc.rc` 全文，供刷机前终审。
+
+#### Step 13：全仓脚本与 Workflow 二轮逐行代码复核（修复 6 项隐性缺陷）
+- **排查并修复的具体问题**：
+  1. **`scripts/check_sepolicy.py` 返回值解包崩溃 & CIL 规则覆盖补齐**：修复 `find_missing_tokens_on_line()` 在文件/行号越界早退时返回 `[]` 而非 `([], "")` 导致的 `ValueError` 解包崩溃；补全 `allowx`/`dontauditx` 与 `genfscon` 语句的缺失类型提取。
+  2. **`scripts/03_patch_port.sh` root 挂载目录检测与 `set -e` 安全加固**：将挂载 EROFS / root 暂存树上的非特权 `[[ -f/-d/-e ]]` 及 `[[ -d ... ]] && cp` 统一改为 `if sudo test -d/-f/-e ...; then ...; fi`；将多处双引号内嵌 `python3 -c` 改为 `sys.argv` / 单引号 heredoc 传参，消除转义与路径注入隐患。
+  3. **`scripts/03_patch_port.sh` `/oem/oem.prop` 扁平化防御性修复**：写入 `ro.vivo.default.oem.name` 前补齐 `if key not in kv: order.append(key)`，防止基础文件缺键时属性漏写。
+  4. **`flash_port_mac.sh` 刷机状态机加固**：若用户启动脚本时手机已处于 `fastbootd`，刷写 `vbmeta`/`vbmeta_system` 前先自动 `fastboot reboot bootloader` 切回 Bootloader 模式关闭 AVB，再切入 `fastbootd` 并强断言 `is-userspace == yes` 后才执行逻辑分区缩容与刷写。
+  5. **`.github/workflows/00-mirror-to-gh-release.yml` 两项防翻车加固**：
+     - 在耗时约 20 分钟的魔搭拉取**之前**增加 2 秒前置检查（校验 `STORAGE_GH_REPO` 非空仓库与 `STORAGE_GH_TOKEN` 的 Release 写权限），配置有误时秒级报错，避免白等 20 分钟；
+     - 改用临时文件传递 `MANIFEST_NAME`，避免 `modelscope_hub` 向 `stdout` 输出日志污染命令替换结果。
+  6. **全量静态校验通过**：对全部 8 个 `.sh`、内嵌 133 行 `flash_port_mac.sh`、全部 5 个 `.py`（AST 解析）及全部 3 个 GitHub Actions `.yml` 完成语法与格式复核。
+
+#### Step 14：三轮实机链路深度复核（对照 K90 `fstab.qcom` / `super` / `build.prop` 实测数据修复 6 项深层缺陷）
+- **排查并修复的具体问题**：
+  1. **`scripts/03_patch_port.sh` 致命权限清理缺陷（高危）**：`secilc` 门禁结束后执行 `rm -rf "$WORK_ROOT/neo11_sepolicy" "$WORK_ROOT/k90_sepolicy"` 漏加 `sudo`，而该目录由 `sudo cp -r` 创建、属主为 `root:root`，会导致构建在 `secilc` 通过后因 `Permission denied` 中断；已修正为 `sudo rm -rf`，并在 `EXIT` trap（`cleanup_mounts`）中增加对 `$REPORT_DIR` 的自动 `chown`，确保即使中途失败报告也可完整上传。
+  2. **K90 `fstab.qcom` `/product/vm-system` 缺失挂载点修复**：对照 K90 实测 `vendor/etc/fstab.qcom` 第 97 行发现 `vm-bootsys -> /product/vm-system`（无 `nofail` 标记），而 Neo 11 `product.img` 不含 `/product/vm-system` 目录；现于 Phase D 在只读 EROFS 打包前主动创建 `0755 root:root`、`u:object_r:system_file:s0` 的 `/product/vm-system` 空挂载点。
+  3. **`.github/workflows/02-build-port.yml` 1 秒前置 Secret 校验**：在安装工具与拉包前先校验 `PORT_ROM_SOURCE` / `STORAGE_GH_TOKEN` / `MODELSCOPE_API_TOKEN` / `MS_OUTPUT_REPO` 组合完整性，杜绝切完 `gh-release://` 后漏填 `MS_OUTPUT_REPO` 导致跑完 15 分钟打包才在上传阶段报错。
+  4. **`system_only` 增量构建 SEPolicy Shim 持久化机制**：支持可选仓库跟踪文件 `config/sepolicy_shims.cil`，在 `full` 与 `system_only` 两种模式下均会注入 `mapping/202404.cil`，避免首版 `full` 产出的跨厂 SELinux 兼容垫片在后续 `system_only` 快速构建时丢失。
+  5. **属性与去臃肿闭环补齐**：在 `config/prop_override.conf` 补充关闭 `ro.vivo.vivo4dgamevib.enable=0` 与 `ro.vivo.cota.enable=0`（与移除 `vibrator4d`/`COTA`/`Updater` 一致）；在 `debug_adb=true` 时若 Neo 11 含 `/system/etc/prop.default` 则同步覆写 `ro.adb.secure`/`ro.debuggable`，防止写一次属性提前锁死；将 `remove_list.txt` 解析重构为纯 Bash 通用函数 `apply_remove_list`，同时支持 `[system]` 与 `[product]`。
+  6. **`flash_port_mac.sh` 清除数据兜底**：若 `fastboot -w` 在 `fastbootd` 下失败，自动回退执行 `fastboot erase metadata && fastboot erase userdata`（K90 `fstab.qcom` 均标有 `formattable`，首次开机自动按原生 F2FS + `inlinecrypt` 参数重建）。
+
 ---
 
 ## 待补操作清单（Pending / Next Steps）
 
 以下为尚未执行、需要逐步补齐的操作项（每完成一项将移入上方正式记录并标注日期与结果）：
 
-### A. 仓库与阿里魔搭 ModelScope 对接（立即可做）
-- [ ] **A1. 提交代码并推送到 GitHub 远端**（优先推荐建 **Public** 仓库以获得 4 核 + 150 GB 大盘 + 无限时长；确认两个大包已被 `.gitignore` 屏蔽）。
-- [ ] **A2. 准备魔搭 ModelScope 私有数据集与 Token（国内直连免梯子）**：
-  - 登录 [魔搭社区](https://modelscope.cn/datasets/create) 创建一个 **非公开（私有）数据集**（如 `<你的魔搭用户名>/redmi-k90-roms`）。
-  - 在 [魔搭访问令牌页](https://modelscope.cn/my/myaccesstoken) 获取具备 **读写权限** 的 SDK Token。
-  - 在 macOS 运行 `bash scripts/local_upload_ms.sh <魔搭用户名>/redmi-k90-roms PD2520A_17.1.15.2W10.V000L1-update-full.zip` 上传 10 GB 源包（K90 底包无需上传，Actions 直接免费拉取小米官方 CDN）。
-  - 在 GitHub 仓库 `Settings → Secrets and variables → Actions` 新增 Secret：**`MODELSCOPE_API_TOKEN`**。
-- [ ] **A3. 在 GitHub Actions 运行 `01 - Inspect K90 & Neo 11 ROMs`**，下载 `k90-neo11-inspection-report` Artifact 并交给下一阶段分析。
-- [ ] **A4. 本地 macOS 补装轻量工具**：按需安装 `zstd`（`brew install zstd`，用于后续解压成品包）。
+### A. 仓库与阿里魔搭 ModelScope 对接
+- [x] **A1. 提交代码并推送到 GitHub 远端**（已完成，Public 仓库）。
+- [x] **A2. 准备魔搭 ModelScope 私有数据集与 Token 并上传 Neo 11 源包**（已完成，6 路分卷上传完毕）。
+- [x] **A3. 在 GitHub Actions 运行 `01 - Inspect K90 & Neo 11 ROMs` 并回收报告**（已完成，见 Step 10）。
+- [ ] **A4. （强烈推荐）可选一次性镜像转存**：将魔搭 6 个分卷云端中转至 GitHub 私有 Release，使后续所有阶段二构包拉取 Neo 11 从 ~20 分钟缩短至 ~20 秒。
+- [ ] **A5. 本地 macOS 补装轻量工具**：按需安装 `zstd`（`brew install zstd`，用于后续解压成品包）。
 
 ### B. 手机端前置安全备份（刷机前强制项）
 - [ ] **B1. 确认红米 K90 已解锁 BL 并刷至 HyperOS 4（`OS4.0.6.0.XPKCNXM`）底包**。
@@ -125,15 +182,11 @@
 - [ ] **B3. 备份不可再生分区**：Root 下 `dd` 备份 `persist`、`modemst1`、`modemst2`、`fsg`、`fsc`、`devinfo` 到 `backups/` 并校验 `SHA256SUMS`。
 - [ ] **B4. 本地预解压一份 K90 救砖线刷包**（独立于 Git 目录外），确保随时可执行 `flash_all.sh` 一键救砖。
 
-### C. 阶段二正式打包脚本建设（待 A3 体检报告产出后精准编写）
+### C. 阶段二正式打包脚本建设
 - [x] **C1. 编写 `01-inspect-roms.yml` 与全套体检脚本**（已完成，见 Step 4）。
-- [ ] **C2. 根据体检报告落盘 `config/` 与 `patches/`**：
-  - `config/device_annibale.env`（精确 `super` 元数据与分区字节上限）
-  - `config/remove_list.txt`（`Vivo3rdAlgoService`、Q2 独显强绑定服务、超容量预装第三方 App 精简列表）
-  - `config/prop_override.conf`（合并 `vgc.prop`/`oem.prop`/`dyn.prop` + 品牌伪装 + 禁改白名单）
-  - `config/vintf_relax.json`（放宽 K90 缺失的 vivo 私有 HAL 强依赖）
-  - `patches/overlays/`（K90 2K `1440×3200` / 挖孔 / 圆角 / 亮度 / 6500mAh 电池 RRO）
-- [ ] **C3. 编写 `02-build-port.yml` 与正式构建脚本**：实现清盘、边解边删、自动打补丁、EROFS 打包、容量与挂载门禁自检、并自动免切片上传成品 ROM 至 Hugging Face 私有 Dataset（可选同步发 GitHub Release 1.9 GB 分卷）。
+- [x] **C2. 根据体检报告落盘 `config/` 与核心脚本**（已完成，见 Step 11：`device_annibale.env`、`remove_list.txt`、`prop_override.conf`、`erofs_repack.py`、`patch_props.py`、`03_patch_port.sh`、`05_upload_ms.sh`、`local_download_ms.sh`）。
+- [x] **C3. 编写 `00-mirror-to-gh-release.yml` 与 `02-build-port.yml`**（已完成，见 Step 11）。
+- [ ] **C4. 按需补充阶段三精细化 RRO 适配包**：根据首版实机运行效果，视需要提取 K90 挖孔/圆角/自动亮度曲线/电池配置打成轻量 `K90OriginOverlay.apk`。
 
 ### D. 刷机点亮与迭代排障
 - [ ] **D1. 准备 K90 原厂 `init_boot.img`/`boot.img` 的 Root + 调试期 SELinux Permissive 方案**。

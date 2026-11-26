@@ -1,0 +1,200 @@
+name: "02 - Build OriginOS 7 Port for REDMI K90"
+
+on:
+  workflow_dispatch:
+    inputs:
+      build_tag:
+        description: "Version tag for this build (e.g. v0.1-bringup, v0.2-fix-fp)"
+        required: true
+        default: "v0.1-bringup"
+      build_scope:
+        description: "full = all partitions + vbmeta (first flash) | system_only = fast system.img rebuild"
+        type: choice
+        required: true
+        default: "full"
+        options:
+          - full
+          - system_only
+      debug_adb:
+        description: "Enable early passwordless ADB logcat & disable RescueParty (recommended for bring-up)"
+        type: boolean
+        required: true
+        default: true
+      erofs_compress:
+        description: "EROFS compression level (lz4hc,9 is fast & 100% compatible with K90 kernel)"
+        type: choice
+        required: true
+        default: "lz4hc,9"
+        options:
+          - lz4hc,9
+          - lz4hc,12
+      upload_to_ms:
+        description: "Automatically upload packaged ROM bundle to ModelScope Private Dataset"
+        type: boolean
+        required: true
+        default: true
+
+permissions:
+  contents: read
+
+jobs:
+  build-port:
+    runs-on: ubuntu-latest
+    timeout-minutes: 180
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pre-flight secrets & config validation (fail-fast in 1s)
+        env:
+          PORT_ROM_SOURCE: ${{ secrets.PORT_ROM_SOURCE }}
+          MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
+          MS_OUTPUT_REPO: ${{ secrets.MS_OUTPUT_REPO }}
+          STORAGE_GH_TOKEN: ${{ secrets.STORAGE_GH_TOKEN }}
+          UPLOAD_TO_MS: ${{ inputs.upload_to_ms }}
+        run: |
+          set -euo pipefail
+          if [[ -z "${PORT_ROM_SOURCE:-}" ]]; then
+            echo "[FATAL] Secret PORT_ROM_SOURCE is not set!"
+            exit 1
+          fi
+          if [[ "$PORT_ROM_SOURCE" == gh-release://* && -z "${STORAGE_GH_TOKEN:-}" ]]; then
+            echo "[FATAL] PORT_ROM_SOURCE uses gh-release:// but secret STORAGE_GH_TOKEN is empty!"
+            exit 1
+          fi
+          if [[ "$PORT_ROM_SOURCE" == ms://* && -z "${MODELSCOPE_API_TOKEN:-}" ]]; then
+            echo "[FATAL] PORT_ROM_SOURCE uses ms:// but secret MODELSCOPE_API_TOKEN is empty!"
+            exit 1
+          fi
+          if [[ "$UPLOAD_TO_MS" == "true" ]]; then
+            if [[ -z "${MODELSCOPE_API_TOKEN:-}" ]]; then
+              echo "[FATAL] upload_to_ms=true requires secret MODELSCOPE_API_TOKEN!"
+              exit 1
+            fi
+            if [[ -z "${MS_OUTPUT_REPO:-}" && "$PORT_ROM_SOURCE" != ms://* ]]; then
+              echo "[FATAL] upload_to_ms=true with non-ms:// PORT_ROM_SOURCE requires secret MS_OUTPUT_REPO (e.g. yourname/redmi-k90-roms)!"
+              exit 1
+            fi
+          fi
+          echo "[Pre-flight] Secrets & source configuration validated OK!"
+
+      - name: Free runner disk space & select largest mount
+        run: |
+          chmod +x scripts/*.sh scripts/*.py
+          bash scripts/00_clean_runner_disk.sh
+
+      - name: Install Android EROFS / payload / archive tools
+        env:
+          PORT_ROM_SOURCE: ${{ secrets.PORT_ROM_SOURCE }}
+          UPLOAD_TO_MS: ${{ inputs.upload_to_ms }}
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y --no-install-recommends \
+            erofs-utils android-sdk-libsparse-utils secilc aria2 zstd unzip attr file python3 python3-pip
+
+          # Install payload-dumper-go (v2.1.0, verified in Stage 1)
+          curl -fsSL "https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz" \
+            -o /tmp/pdg.tar.gz
+          sudo tar -xzf /tmp/pdg.tar.gz -C /usr/local/bin payload-dumper-go
+          sudo chmod +x /usr/local/bin/payload-dumper-go
+          rm -f /tmp/pdg.tar.gz
+          mkfs.erofs -V
+          secilc --version || true
+          payload-dumper-go -v || true
+
+          # Install lightweight modelscope-hub if pulling from ms:// or uploading finished bundle to ModelScope
+          if [[ "$PORT_ROM_SOURCE" == ms://* || "$UPLOAD_TO_MS" == "true" ]]; then
+            python3 -m pip install --break-system-packages -q "modelscope-hub>=0.5.0"
+          fi
+
+      - name: Build, patch, repack EROFS & run capacity/SELinux gates
+        env:
+          PORT_ROM_SOURCE: ${{ secrets.PORT_ROM_SOURCE }}
+          MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
+          STORAGE_GH_TOKEN: ${{ secrets.STORAGE_GH_TOKEN }}
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          ADB_PUBLIC_KEY: ${{ secrets.ADB_PUBLIC_KEY }}
+          BUILD_TAG: ${{ inputs.build_tag }}
+          BUILD_SCOPE: ${{ inputs.build_scope }}
+          DEBUG_ADB: ${{ inputs.debug_adb }}
+          EROFS_COMPRESS: ${{ inputs.erofs_compress }}
+          REPORT_DIR: ${{ env.WORK_ROOT }}/build_report
+          OUT_DIR: ${{ env.WORK_ROOT }}/port_bundle
+        run: |
+          bash scripts/03_patch_port.sh
+
+      - name: Upload packaged ROM bundle to ModelScope Private Dataset
+        if: ${{ inputs.upload_to_ms }}
+        env:
+          MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
+          MS_OUTPUT_REPO: ${{ secrets.MS_OUTPUT_REPO }}
+          PORT_ROM_SOURCE: ${{ secrets.PORT_ROM_SOURCE }}
+          BUILD_TAG: ${{ inputs.build_tag }}
+          BUILD_SCOPE: ${{ inputs.build_scope }}
+          OUT_DIR: ${{ env.WORK_ROOT }}/port_bundle
+        run: |
+          set -euo pipefail
+          TARGET_MS_REPO="${MS_OUTPUT_REPO:-}"
+          # Fallback: auto-derive ModelScope dataset ID if PORT_ROM_SOURCE is ms://<owner>/<repo>/...
+          if [[ -z "$TARGET_MS_REPO" && "$PORT_ROM_SOURCE" == ms://* ]]; then
+            REST="${PORT_ROM_SOURCE#ms://}"
+            TARGET_MS_REPO="$(echo "$REST" | cut -d/ -f1,2)"
+          fi
+          if [[ -z "$TARGET_MS_REPO" ]]; then
+            echo "[FATAL] Please set secret MS_OUTPUT_REPO (e.g. yourname/redmi-k90-roms) when upload_to_ms=true!"
+            exit 1
+          fi
+          echo "::add-mask::$TARGET_MS_REPO"
+
+          ARCHIVE_NAME="OriginOS7_RedmiK90_${BUILD_TAG}_${BUILD_SCOPE}.tar.zst"
+          echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
+          bash scripts/05_upload_ms.sh "$OUT_DIR" "$TARGET_MS_REPO" "$ARCHIVE_NAME" "builds/${BUILD_TAG}"
+
+      - name: Upload lightweight build & verification report Artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k90-originos7-build-report-${{ inputs.build_tag }}
+          path: ${{ env.WORK_ROOT }}/build_report
+          retention-days: 30
+
+      - name: Write GitHub Step Summary
+        if: always()
+        env:
+          REPORT_DIR: ${{ env.WORK_ROOT }}/build_report
+          BUILD_TAG: ${{ inputs.build_tag }}
+          BUILD_SCOPE: ${{ inputs.build_scope }}
+          ARCHIVE_NAME: ${{ env.ARCHIVE_NAME }}
+        run: |
+          {
+            echo "## OriginOS 7 -> REDMI K90 Build Report (\`${BUILD_TAG}\` / \`${BUILD_SCOPE}\`)"
+            echo ""
+            if [[ -f "$REPORT_DIR/capacity_summary.txt" ]]; then
+              echo "### Super Capacity Gate"
+              echo '```text'
+              cat "$REPORT_DIR/capacity_summary.txt"
+              echo '```'
+            fi
+            echo "### EROFS & SELinux Post-Pack Verification"
+            echo '```text'
+            cat "$REPORT_DIR"/verify_*.txt 2>/dev/null || echo "(no verify logs)"
+            echo '```'
+            if [[ -f "$REPORT_DIR/sepolicy_check.txt" ]]; then
+              echo "### Split SEPolicy (secilc) Pre-Flight Gate"
+              echo '```text'
+              cat "$REPORT_DIR/sepolicy_check.txt"
+              echo '```'
+            fi
+            if [[ -f "$REPORT_DIR/removed_items.txt" ]]; then
+              echo "### Debloated / Removed Items"
+              echo '```text'
+              cat "$REPORT_DIR/removed_items.txt"
+              echo '```'
+            fi
+            if [[ -n "${ARCHIVE_NAME:-}" ]]; then
+              echo "### macOS Download Command (ModelScope Domestic Full Speed)"
+              echo '```bash'
+              echo "MODELSCOPE_API_TOKEN=<你的魔搭Token> bash scripts/local_download_ms.sh <你的魔搭数据集ID> builds/${BUILD_TAG}/${ARCHIVE_NAME}.parts.json out/${BUILD_TAG}"
+              echo '```'
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

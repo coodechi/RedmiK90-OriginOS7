@@ -20,6 +20,7 @@ backups/
 logs/
 tmp/
 .ms_parts_*/
+k90-neo11-inspection-report/
 
 # Local secret / helper scripts (NEVER commit tokens!)
 upload.sh
@@ -30,3 +31,5 @@ upload.sh
 # macOS junk
 .DS_Store
 ._*
+
+/k90-neo11-inspection-report
