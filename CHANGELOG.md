@@ -95,6 +95,14 @@
   - **关键容量结论**：K90 必须保留的底层 4 分区合计 **`3,940.80 MiB`（~3.85 GiB）**，留给 OriginOS 7 三分区（`system`+`product`+`system_ext`）的实际安全上限约 **`8,850 MiB`（~8.64 GiB）**；而 Neo 11 原包三分区为 `10,156.35 MiB`（~9.92 GiB），**确认后续必须精简 ≥ 1.4~1.8 GiB 预装非核心内容**。
 - **问题修复**：[`scripts/02_inspect_roms.sh`](scripts/02_inspect_roms.sh) 在挂载 `k90_vendor` 后以非 root 权限执行 `find`，触发 EROFS 内 `0700 root` 目录返回码 1 并被 `set -euo pipefail` 中断；已统一改为 `sudo find`/`sudo cat`/`sudo cp`，对所有管道（含 `head` 的 SIGPIPE）加容错保护，并在上传 Artifact 前自动 `chown`/`chmod` 与增加 `trap` 清理挂载。
 
+#### Step 9：优化魔搭跨洋拉包并发提速（6 路并行）并新增 GitHub Release 内网极速源支持
+- **现象**：美国 GitHub Actions Runner 串行单分片拉取国内魔搭 OSS 速度仅约 `1.3~1.8 MB/s`，6 片串行耗时约 100+ 分钟，存在超过原 `90` 分钟超时上限的风险。
+- **优化**：
+  - 升级 [`scripts/01_fetch_rom.sh`](scripts/01_fetch_rom.sh)：
+    - 魔搭 `.parts.json` 改为 **`ThreadPoolExecutor(max_workers=6)` 6 路并发拉取**，充分利用跨洋多 TCP 并发带宽将总耗时压至约 15~25 分钟；
+    - 新增 **`gh-release://<owner>/<repo>/<tag>/<asset>`** 协议支持（自动兼容 `.parts.json` 分卷并行下载与 SHA256 校验），便于后续把源包转存到 GitHub 私有 Release 实现 **~20 秒内网秒拉**。
+  - 将 [`.github/workflows/01-inspect-roms.yml`](.github/workflows/01-inspect-roms.yml) 的 `timeout-minutes` 提高至 `180`，并注入 `STORAGE_GH_TOKEN` / `GITHUB_TOKEN`。
+
 ---
 
 ## 待补操作清单（Pending / Next Steps）
