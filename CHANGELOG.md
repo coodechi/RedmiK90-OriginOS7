@@ -165,6 +165,7 @@
   7. **修复 `00-mirror-to-gh-release.yml` 第 84 行 YAML 缩进语法错误**：将原先内联在 YAML `run: |` 块中未缩进的 Python heredoc 拆分为独立脚本 [`scripts/00_mirror_ms_to_gh.py`](scripts/00_mirror_ms_to_gh.py)，并使用 macOS 原生 Ruby `YAML.load_file`（Psych 解析器）复验全部 3 个 Workflow YAML 语法全部通过。
   8. **修复 `scripts/03_patch_port.sh` 嵌套解包误选 `vbmeta_vgc.img`/`vbmeta_oem.img`**：`vgc_*.zip` 与 `oem_*.zip` 的 `payload.bin` 内均同时包含分区镜像与对应 `vbmeta_*.img`，原 `find -name '*.img' | head -n 1` 命中了 `vbmeta_*` 导致 `mount -t erofs` 报退出码 `32`；已改为指定 `-p vgc` / `-p oem` 提取并精确匹配 `vgc.img`、`oem.img`（排除 `vbmeta*`）。
   9. **防宿主机 `secilc` 版本代差误杀 + 挂载/通配符细节加固**：`scripts/check_sepolicy.py` 在校检 `Neo 11 + K90` 前先用纯原厂 K90 五分区 CIL 做 0.3 秒基线自校（若 Ubuntu 24.04 自带 `secilc 3.5` 连原厂 Android 17 CIL 语法都不支持，则输出警告并跳过硬拦截，避免误杀）；`mount_erofs_ro` 增加 `-o ro,loop` 自动文件系统兜底；修复 `sudo du -sm .../*` 非 root shell 展开通配符问题，并在 `mkfs.erofs` 前清理同名旧镜像。
+  10. **修复悬空软链写入导致的 `ENOENT` 并全仓排查同类路径**：SAR `system.img` 根目录 `/adb_keys` 原生可能为悬空软链，`sudo tee` 跟随软链写入触发 `No such file or directory`；现写入 `/adb_keys` 与 `/system/etc/security/adb_keys` 前先 `mkdir -p` 并 `rm -f` 解链，同时全仓对 `/oem`、`/oem/oem.prop`、`prop.default`、`/product/vm-system`、`displayconfig` 及 `erofs_repack.py` 目录创建统一补齐软链前置解链防护。
 
 ---
 

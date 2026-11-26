@@ -98,6 +98,8 @@ def copy_tree_lossless(src_root, dst_root, override_selinux=None):
                 if "security.selinux" in xa or override_selinux:
                     stats["selinux_copied"] += 1
             else:
+                if os.path.islink(dp):
+                    os.unlink(dp)
                 os.makedirs(dp, exist_ok=True)
                 os.chmod(dp, 0o755)  # Writable while populating; restored bottom-up
                 xa = get_xattrs(sp)

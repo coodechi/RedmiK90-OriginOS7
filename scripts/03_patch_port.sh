@@ -336,7 +336,13 @@ rm -rf "$WORK_ROOT/neo11_vgc_raw"
 
 # --- C3. Populate /oem inside SAR system root (retail China variant flattened) ---
 echo "[Patch] Injecting Neo 11 /oem (variant=$VIVO_OEM_VARIANT) into SAR system root..."
+if sudo test -L "$STAGE_SYS/oem"; then
+  sudo rm -f "$STAGE_SYS/oem"
+fi
 sudo mkdir -p "$STAGE_SYS/oem"
+sudo chown 0:0 "$STAGE_SYS/oem"
+sudo chmod 0755 "$STAGE_SYS/oem"
+sudo python3 -c 'import os,sys; os.setxattr(sys.argv[1],"security.selinux",b"u:object_r:system_file:s0\x00")' "$STAGE_SYS/oem"
 if sudo test -d "$MNT_OEM/etc"; then
   sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$MNT_OEM/etc" "$STAGE_SYS/oem/etc" --override-selinux "u:object_r:system_file:s0"
 fi
@@ -349,6 +355,7 @@ fi
 
 # Flatten base oem.prop + variant oem.prop into /oem/oem.prop so init's `import /oem/oem.prop`
 # loads all retail China OriginOS 7 identity/region properties natively!
+sudo rm -f "$STAGE_SYS/oem/oem.prop"
 sudo python3 - "$MNT_OEM/oem.prop" "$MNT_OEM/$VIVO_OEM_VARIANT/oem.prop" "$STAGE_SYS/oem/oem.prop" "$VIVO_OEM_VARIANT" <<'PYEOF'
 import os, sys
 
@@ -398,7 +405,7 @@ if [[ "$DEBUG_ADB" == "true" ]]; then
 fi
 sudo python3 "$REPO_ROOT/scripts/patch_props.py" "${PATCH_ARGS[@]}"
 
-if [[ "$DEBUG_ADB" == "true" ]] && sudo test -f "$STAGE_SYS/system/etc/prop.default"; then
+if [[ "$DEBUG_ADB" == "true" ]] && sudo test -f "$STAGE_SYS/system/etc/prop.default" && ! sudo test -L "$STAGE_SYS/system/etc/prop.default"; then
   echo "[Patch] Also overriding ADB debug keys inside system/system/etc/prop.default..."
   sudo python3 - "$STAGE_SYS/system/etc/prop.default" <<'PYEOF'
 import os, sys
@@ -446,9 +453,13 @@ PYEOF
 fi
 
 # Optional pre-authorized ADB public key (belt-and-suspenders for v1 logcat)
+# NOTE: In SAR system.img, /adb_keys is often a pre-existing dangling symlink (e.g. -> /data/misc/adb/adb_keys),
+# so we MUST unlink any symlink first before writing regular files!
 if [[ -n "${ADB_PUBLIC_KEY:-}" ]]; then
   echo "[Patch] Baking pre-authorized ADB public key into /adb_keys & /system/etc/security/adb_keys..."
-  printf '%s\n' "$ADB_PUBLIC_KEY" | sudo tee "$STAGE_SYS/adb_keys" "$STAGE_SYS/system/etc/security/adb_keys" >/dev/null
+  sudo mkdir -p "$STAGE_SYS/system/etc/security"
+  sudo rm -f "$STAGE_SYS/adb_keys" "$STAGE_SYS/system/etc/security/adb_keys"
+  printf '%s\n' "${ADB_PUBLIC_KEY//$'\r'/}" | sudo tee "$STAGE_SYS/adb_keys" "$STAGE_SYS/system/etc/security/adb_keys" >/dev/null
   sudo chown 0:0 "$STAGE_SYS/adb_keys" "$STAGE_SYS/system/etc/security/adb_keys"
   sudo chmod 0644 "$STAGE_SYS/adb_keys" "$STAGE_SYS/system/etc/security/adb_keys"
   sudo python3 -c 'import os,sys; os.setxattr(sys.argv[1],"security.selinux",b"u:object_r:adb_keys_file:s0\x00")' "$STAGE_SYS/adb_keys"
@@ -568,6 +579,9 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
   apply_remove_list "product" "$STAGE_PROD" "$REMOVED_LOG"
 
   # Ensure /product/vm-system mountpoint exists for K90 vendor/etc/fstab.qcom (vm-bootsys, no 'nofail'!)
+  if sudo test -L "$STAGE_PROD/vm-system"; then
+    sudo rm -f "$STAGE_PROD/vm-system"
+  fi
   if ! sudo test -d "$STAGE_PROD/vm-system"; then
     echo "[Patch] Creating /product/vm-system mountpoint for K90 fstab.qcom..."
     sudo mkdir -p "$STAGE_PROD/vm-system"
@@ -578,7 +592,12 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
 
   if [[ -n "$K90_EXTRACTED_DC" && -f "$K90_EXTRACTED_DC" ]]; then
     echo "[Patch] Injecting K90 displayconfig XML into product/$K90_PRODUCT_DISPLAYCONFIG..."
-    sudo mkdir -p "$STAGE_PROD/$(dirname "$K90_PRODUCT_DISPLAYCONFIG")"
+    DC_PARENT="$STAGE_PROD/$(dirname "$K90_PRODUCT_DISPLAYCONFIG")"
+    if sudo test -L "$DC_PARENT"; then
+      sudo rm -f "$DC_PARENT"
+    fi
+    sudo mkdir -p "$DC_PARENT"
+    sudo rm -f "$STAGE_PROD/$K90_PRODUCT_DISPLAYCONFIG"
     sudo cp "$K90_EXTRACTED_DC" "$STAGE_PROD/$K90_PRODUCT_DISPLAYCONFIG"
     sudo chown 0:0 "$STAGE_PROD/$K90_PRODUCT_DISPLAYCONFIG"
     sudo chmod 0644 "$STAGE_PROD/$K90_PRODUCT_DISPLAYCONFIG"
