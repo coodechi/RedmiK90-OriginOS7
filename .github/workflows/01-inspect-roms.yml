@@ -9,9 +9,9 @@ on:
         default: "https://cdnorg.d.miui.com/OS4.0.6.0.XPKCNXM/annibale_images_OS4.0.6.0.XPKCNXM_20261026.0000.00_17.0_cn_8129267a3b.tgz"
         type: string
       port_rom_source:
-        description: "iQOO Neo 11 源包来源：填 ms://<魔搭用户名>/<私有数据集名>/PD2520A_17.1.15.2W10.V000L1-update-full.zip.parts.json（支持分卷清单或单文件）"
-        required: true
-        default: "ms://<YOUR_MS_USERNAME>/redmi-k90-roms/PD2520A_17.1.15.2W10.V000L1-update-full.zip.parts.json"
+        description: "iQOO Neo 11 源包来源（留空则自动读取 Secret PORT_ROM_SOURCE，推荐留空以隐藏私有库路径）"
+        required: false
+        default: ""
         type: string
 
 jobs:
@@ -45,8 +45,13 @@ jobs:
           MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
           HF_TOKEN: ${{ secrets.HF_TOKEN }}
           STOCK_SOURCE: ${{ inputs.stock_rom_source }}
-          PORT_SOURCE: ${{ inputs.port_rom_source }}
-        run: bash scripts/02_inspect_roms.sh
+          PORT_SOURCE: ${{ inputs.port_rom_source || secrets.PORT_ROM_SOURCE }}
+        run: |
+          if [ -z "$PORT_SOURCE" ]; then
+            echo "ERROR: port_rom_source input and secret PORT_ROM_SOURCE are both empty." >&2
+            exit 1
+          fi
+          bash scripts/02_inspect_roms.sh
 
       - name: Upload lightweight inspection report artifact
         if: always()

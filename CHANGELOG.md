@@ -84,6 +84,17 @@
   - 更新 [`.github/workflows/01-inspect-roms.yml`](.github/workflows/01-inspect-roms.yml) 默认示例指向 `.parts.json`。
   - 安全加固：在 [`.gitignore`](.gitignore) 中追加屏蔽 `upload.sh`、`*.local.sh`、`.env*`，防止本地含 Token 的启动脚本被误提交到 GitHub。
 
+#### Step 8：首次云端体检跑通 K90 `super` 拆包并修复只读挂载权限退出问题
+- **首次云端运行实测成果**（Public 仓库 Runner 实测 145 GB 盘 / 104 GB 剩余空间，小米 CDN + `lp_tools.py` + 内核 EROFS 挂载全数一次通过）：
+  - 红米 K90 `OS4.0.6.0.XPKCNXM` `super` 逻辑分区精确体积实测：
+    - `odm_a`：**3,164.62 MiB**（小米将绝大部分底层硬件/相机/固件放在 `odm_a`）
+    - `vendor_a`：**708.27 MiB**
+    - `vendor_dlkm_a`：**53.32 MiB**
+    - `system_dlkm_a`：**14.59 MiB**
+    - 原厂 `product_a`（5,238.69 MiB）、`system_a`（932.01 MiB）、`system_ext_a`（778.64 MiB）、`mi_ext_a`（162.89 MiB）、`mi_product_a`（0.33 MiB）
+  - **关键容量结论**：K90 必须保留的底层 4 分区合计 **`3,940.80 MiB`（~3.85 GiB）**，留给 OriginOS 7 三分区（`system`+`product`+`system_ext`）的实际安全上限约 **`8,850 MiB`（~8.64 GiB）**；而 Neo 11 原包三分区为 `10,156.35 MiB`（~9.92 GiB），**确认后续必须精简 ≥ 1.4~1.8 GiB 预装非核心内容**。
+- **问题修复**：[`scripts/02_inspect_roms.sh`](scripts/02_inspect_roms.sh) 在挂载 `k90_vendor` 后以非 root 权限执行 `find`，触发 EROFS 内 `0700 root` 目录返回码 1 并被 `set -euo pipefail` 中断；已统一改为 `sudo find`/`sudo cat`/`sudo cp`，对所有管道（含 `head` 的 SIGPIPE）加容错保护，并在上传 Artifact 前自动 `chown`/`chmod` 与增加 `trap` 清理挂载。
+
 ---
 
 ## 待补操作清单（Pending / Next Steps）

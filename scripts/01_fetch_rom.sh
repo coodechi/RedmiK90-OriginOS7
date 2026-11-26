@@ -21,7 +21,7 @@ download_ms() {
   local filename="$2"
   local revision="${3:-master}"
 
-  echo "Fetching from ModelScope Dataset: repo_id=${repo_id} rev=${revision} file=${filename}"
+  echo "Fetching from ModelScope Dataset (rev=${revision}, file=$(basename "$filename"))"
   python3 - "$repo_id" "$filename" "$revision" "$OUTFILE" <<'PYEOF'
 import hashlib, json, os, shutil, sys
 from modelscope_hub import HubApi
@@ -86,7 +86,7 @@ download_hf() {
   local filename="$2"
   local revision="${3:-main}"
 
-  echo "Fetching from Hugging Face Dataset: repo_id=${repo_id} rev=${revision} file=${filename}"
+  echo "Fetching from Hugging Face Dataset (rev=${revision}, file=$(basename "$filename"))"
   python3 - "$repo_id" "$filename" "$revision" "$OUTFILE" <<'PYEOF'
 import os, shutil, sys
 from huggingface_hub import hf_hub_download

@@ -14,6 +14,18 @@ DL_DIR="$WORK_ROOT/dl"
 MNT_DIR="$WORK_ROOT/mnt"
 mkdir -p "$REPORT_DIR"/{k90,neo11,k90_vintf,neo11_vintf} "$DL_DIR" "$MNT_DIR"
 
+cleanup_mounts() {
+  if [ -d "$MNT_DIR" ]; then
+    for d in "$MNT_DIR"/*; do
+      [ -d "$d" ] || continue
+      if mountpoint -q "$d" 2>/dev/null; then
+        sudo umount "$d" || true
+      fi
+    done
+  fi
+}
+trap cleanup_mounts EXIT
+
 mount_ro() {
   local img="$1"
   local target="$2"
@@ -34,6 +46,23 @@ umount_safe() {
   local target="$1"
   if mountpoint -q "$target" 2>/dev/null; then
     sudo umount "$target" || true
+  fi
+}
+
+collect_props_from_mount() {
+  local label="$1"
+  local mp="$2"
+  local maxdepth="$3"
+  local out_file="$4"
+  local files
+  files=$(sudo find "$mp" -maxdepth "$maxdepth" -type f \( -name "*build.prop" -o -name "prop.default" \) 2>/dev/null | sort || true)
+  if [ -n "$files" ]; then
+    while IFS= read -r pf; do
+      [ -n "$pf" ] || continue
+      echo "### ${label}/${pf#$mp/} ###" >> "$out_file"
+      sudo cat "$pf" >> "$out_file" 2>/dev/null || true
+      echo "" >> "$out_file"
+    done <<< "$files"
   fi
 }
 
@@ -85,11 +114,11 @@ df -h "$WORK_ROOT"
     [ -f "$img" ] || continue
     echo "--- $(basename "$img") ($(stat -c%s "$img") bytes) ---"
     file "$img" || true
-    dump.erofs "$img" 2>/dev/null | head -n 20 || true
+    (dump.erofs "$img" 2>/dev/null || true) | head -n 20 || true
   done
 } > "$REPORT_DIR/k90/k90_fs_details.txt"
 
-# Inspect K90 vendor & odm (handle both vendor.img and vendor_a.img naming)
+# Inspect K90 logical partitions via read-only EROFS mounts
 for base in vendor odm product system_ext system; do
   img=""
   for cand in "$K90_PARTS/${base}_a.img" "$K90_PARTS/${base}.img"; do
@@ -99,39 +128,38 @@ for base in vendor odm product system_ext system; do
 
   mp="$MNT_DIR/k90_$base"
   if mount_ro "$img" "$mp"; then
-    # Collect build.prop files
-    find "$mp" -maxdepth 3 -name "*build.prop" -o -name "prop.default" 2>/dev/null | while read -r pf; do
-      rel="${pf#$mp/}"
-      echo "### K90 $base/$rel ###" >> "$REPORT_DIR/k90/k90_${base}_props.txt"
-      cat "$pf" >> "$REPORT_DIR/k90/k90_${base}_props.txt" 2>/dev/null || true
-      echo "" >> "$REPORT_DIR/k90/k90_${base}_props.txt"
-    done
+    collect_props_from_mount "K90 $base" "$mp" 3 "$REPORT_DIR/k90/k90_${base}_props.txt"
 
     # Collect fstab
-    find "$mp" -maxdepth 3 -name "fstab*" 2>/dev/null | while read -r ff; do
-      echo "### K90 $base/${ff#$mp/} ###" >> "$REPORT_DIR/k90/k90_fstab.txt"
-      cat "$ff" >> "$REPORT_DIR/k90/k90_fstab.txt" 2>/dev/null || true
-      echo "" >> "$REPORT_DIR/k90/k90_fstab.txt"
-    done
+    fstabs=$(sudo find "$mp" -maxdepth 3 -type f -name "fstab*" 2>/dev/null | sort || true)
+    if [ -n "$fstabs" ]; then
+      while IFS= read -r ff; do
+        [ -n "$ff" ] || continue
+        echo "### K90 $base/${ff#$mp/} ###" >> "$REPORT_DIR/k90/k90_fstab.txt"
+        sudo cat "$ff" >> "$REPORT_DIR/k90/k90_fstab.txt" 2>/dev/null || true
+        echo "" >> "$REPORT_DIR/k90/k90_fstab.txt"
+      done <<< "$fstabs"
+    fi
 
     # Collect VINTF XMLs from vendor & odm
     if [ "$base" = "vendor" ] || [ "$base" = "odm" ]; then
-      if [ -d "$mp/etc/vintf" ]; then
+      if sudo test -d "$mp/etc/vintf"; then
         mkdir -p "$REPORT_DIR/k90_vintf/$base"
-        cp -a "$mp/etc/vintf/." "$REPORT_DIR/k90_vintf/$base/" || true
+        sudo cp -a "$mp/etc/vintf/." "$REPORT_DIR/k90_vintf/$base/" || true
       fi
     fi
 
     # List overlays & apex
-    if [ -d "$mp/overlay" ]; then
-      find "$mp/overlay" -maxdepth 3 -ls > "$REPORT_DIR/k90/k90_${base}_overlays.txt" 2>/dev/null || true
+    if sudo test -d "$mp/overlay"; then
+      sudo find "$mp/overlay" -maxdepth 3 -ls > "$REPORT_DIR/k90/k90_${base}_overlays.txt" 2>/dev/null || true
     fi
-    if [ -d "$mp/apex" ] || [ -d "$mp/system/apex" ]; then
-      find "$mp" -maxdepth 3 -path "*/apex/*" -ls > "$REPORT_DIR/k90/k90_${base}_apex.txt" 2>/dev/null || true
+    if sudo test -d "$mp/apex" || sudo test -d "$mp/system/apex"; then
+      sudo find "$mp" -maxdepth 3 -path "*/apex/*" -ls > "$REPORT_DIR/k90/k90_${base}_apex.txt" 2>/dev/null || true
     fi
 
     # Collect display config XMLs if present
-    find "$mp" -maxdepth 4 -name "display_id_*.xml" -o -name "displayconfig*" 2>/dev/null >> "$REPORT_DIR/k90/k90_display_files.txt" || true
+    sudo find "$mp" -maxdepth 4 \( -name "display_id_*.xml" -o -name "displayconfig*" \) 2>/dev/null \
+      >> "$REPORT_DIR/k90/k90_display_files.txt" || true
 
     umount_safe "$mp"
   fi
@@ -174,11 +202,15 @@ for sub in vgc_V000_PD2520MA oem_PD2520_ALL_IN_ONE_02; do
   if [ -f "$subzip" ]; then
     mkdir -p "$PORT_OEM/$sub"
     unzip -o "$subzip" -d "$PORT_OEM/$sub" >/dev/null
-    find "$PORT_OEM/$sub" -name "*.prop" | while read -r pf; do
-      echo "### $sub :: ${pf#$PORT_OEM/$sub/} ###" >> "$REPORT_DIR/neo11/neo11_oem_vgc_props.txt"
-      cat "$pf" >> "$REPORT_DIR/neo11/neo11_oem_vgc_props.txt" || true
-      echo "" >> "$REPORT_DIR/neo11/neo11_oem_vgc_props.txt"
-    done
+    sub_props=$(find "$PORT_OEM/$sub" -type f -name "*.prop" 2>/dev/null | sort || true)
+    if [ -n "$sub_props" ]; then
+      while IFS= read -r pf; do
+        [ -n "$pf" ] || continue
+        echo "### $sub :: ${pf#$PORT_OEM/$sub/} ###" >> "$REPORT_DIR/neo11/neo11_oem_vgc_props.txt"
+        cat "$pf" >> "$REPORT_DIR/neo11/neo11_oem_vgc_props.txt" || true
+        echo "" >> "$REPORT_DIR/neo11/neo11_oem_vgc_props.txt"
+      done <<< "$sub_props"
+    fi
     if [ -f "$PORT_OEM/$sub/payload.bin" ]; then
       mkdir -p "$PORT_OEM/${sub}_imgs"
       payload-dumper-go -o "$PORT_OEM/${sub}_imgs" "$PORT_OEM/$sub/payload.bin" || true
@@ -186,7 +218,7 @@ for sub in vgc_V000_PD2520MA oem_PD2520_ALL_IN_ONE_02; do
         [ -f "$img" ] || continue
         mp="$MNT_DIR/neo11_$(basename "$img" .img)"
         if mount_ro "$img" "$mp"; then
-          find "$mp" -maxdepth 4 > "$REPORT_DIR/neo11/files_${sub}_$(basename "$img" .img).txt" 2>/dev/null || true
+          sudo find "$mp" -maxdepth 4 > "$REPORT_DIR/neo11/files_${sub}_$(basename "$img" .img).txt" 2>/dev/null || true
           umount_safe "$mp"
         fi
       done
@@ -201,7 +233,7 @@ done
     [ -f "$img" ] || continue
     echo "--- $(basename "$img") ($(stat -c%s "$img") bytes) ---"
     file "$img" || true
-    dump.erofs "$img" 2>/dev/null | head -n 20 || true
+    (dump.erofs "$img" 2>/dev/null || true) | head -n 20 || true
   done
 } > "$REPORT_DIR/neo11/neo11_fs_details.txt"
 
@@ -211,54 +243,55 @@ for base in system system_ext product; do
   [ -f "$img" ] || continue
   mp="$MNT_DIR/neo11_$base"
   if mount_ro "$img" "$mp"; then
-    # Props
-    find "$mp" -maxdepth 4 \( -name "*build.prop" -o -name "prop.default" \) 2>/dev/null | while read -r pf; do
-      echo "### Neo11 $base/${pf#$mp/} ###" >> "$REPORT_DIR/neo11/neo11_${base}_props.txt"
-      cat "$pf" >> "$REPORT_DIR/neo11/neo11_${base}_props.txt" 2>/dev/null || true
-      echo "" >> "$REPORT_DIR/neo11/neo11_${base}_props.txt"
-    done
+    collect_props_from_mount "Neo11 $base" "$mp" 4 "$REPORT_DIR/neo11/neo11_${base}_props.txt"
 
     # VINTF compatibility matrices
     for vdir in "$mp/etc/vintf" "$mp/system/etc/vintf"; do
-      if [ -d "$vdir" ]; then
+      if sudo test -d "$vdir"; then
         mkdir -p "$REPORT_DIR/neo11_vintf/$base"
-        cp -a "$vdir/." "$REPORT_DIR/neo11_vintf/$base/" || true
+        sudo cp -a "$vdir/." "$REPORT_DIR/neo11_vintf/$base/" || true
       fi
     done
 
     # Top space consumers (critical for planning debloat to fit K90 12.50 GiB super!)
     {
       echo "=== Top directories in $base (depth 2) ==="
-      sudo du -h --max-depth=2 "$mp" 2>/dev/null | sort -hr | head -n 40
+      (sudo du -h --max-depth=2 "$mp" 2>/dev/null | sort -hr || true) | head -n 40 || true
       echo ""
       echo "=== Top 120 largest apps/items in app/priv-app/data-app/preload ==="
-      for adir in "$mp/app" "$mp/priv-app" "$mp/data-app" "$mp/preload" "$mp/system/app" "$mp/system/priv-app" "$mp/system/data-app" "$mp/system/preload" "$mp/system/custom" "$mp/media"; do
-        if [ -d "$adir" ]; then
-          sudo du -sm "$adir"/* 2>/dev/null || true
-        fi
-      done | sort -nr | head -n 120
+      (
+        for adir in "$mp/app" "$mp/priv-app" "$mp/data-app" "$mp/preload" "$mp/system/app" "$mp/system/priv-app" "$mp/system/data-app" "$mp/system/preload" "$mp/system/custom" "$mp/media"; do
+          if sudo test -d "$adir"; then
+            sudo du -sm "$adir"/* 2>/dev/null || true
+          fi
+        done | sort -nr || true
+      ) | head -n 120 || true
     } > "$REPORT_DIR/neo11/neo11_${base}_space.txt"
 
     # Search for Q2 / iris / memc / Vivo3rdAlgo / vibrator / fingerprint / display services
     {
       echo "=== Special hardware / Q2 / Vivo3rdAlgo matches in $base ==="
-      find "$mp" -maxdepth 5 \( \
+      sudo find "$mp" -maxdepth 5 \( \
         -iname "*iris*" -o -iname "*pixelworks*" -o -iname "*memc*" \
         -o -iname "*q2*" -o -iname "*Vivo3rdAlgo*" -o -iname "*VivoFrameworksRes*" \
         -o -iname "*fingerprint*" -o -iname "*vibrat*" -o -iname "*display*" \
-      \) 2>/dev/null | sort
+      \) 2>/dev/null | sort || true
     } > "$REPORT_DIR/neo11/neo11_${base}_hardware_refs.txt"
 
-    # List init rc files & apex
-    find "$mp" -maxdepth 4 -path "*/etc/init/*.rc" 2>/dev/null | sort > "$REPORT_DIR/neo11/neo11_${base}_init_rc.txt" || true
-    find "$mp" -maxdepth 3 -path "*/apex/*" -ls 2>/dev/null > "$REPORT_DIR/neo11/neo11_${base}_apex.txt" || true
-    find "$mp" -maxdepth 4 -path "*/overlay/*" -ls 2>/dev/null > "$REPORT_DIR/neo11/neo11_${base}_overlays.txt" || true
+    # List init rc files, apex, overlays
+    sudo find "$mp" -maxdepth 4 -path "*/etc/init/*.rc" 2>/dev/null | sort > "$REPORT_DIR/neo11/neo11_${base}_init_rc.txt" || true
+    sudo find "$mp" -maxdepth 3 -path "*/apex/*" -ls 2>/dev/null > "$REPORT_DIR/neo11/neo11_${base}_apex.txt" || true
+    sudo find "$mp" -maxdepth 4 -path "*/overlay/*" -ls 2>/dev/null > "$REPORT_DIR/neo11/neo11_${base}_overlays.txt" || true
 
     umount_safe "$mp"
   fi
 done
 
 rm -rf "$PORT_PARTS" "$PORT_OEM"
+
+# Fix ownership & permissions on copied root-owned VINTF/report files so artifact upload succeeds cleanly
+sudo chown -R "$(id -u):$(id -g)" "$REPORT_DIR"
+sudo chmod -R a+rX "$REPORT_DIR"
 
 echo "=========================================="
 echo "[Phase 3] Automated VINTF Compatibility Diff"
@@ -272,12 +305,12 @@ if [ -n "${GITHUB_STEP_SUMMARY:-}" ]; then
     echo ""
     echo "### 1. 红米 K90 \`super\` 分区精确布局"
     echo '```text'
-    cat "$REPORT_DIR/k90/k90_super_layout.txt"
+    cat "$REPORT_DIR/k90/k90_super_layout.txt" || true
     echo '```'
     echo ""
     echo "### 2. VINTF 强依赖差异（Neo 11 要求但 K90 缺失的 HAL）"
     echo '```text'
-    cat "$REPORT_DIR/vintf_diff_summary.txt"
+    cat "$REPORT_DIR/vintf_diff_summary.txt" || true
     echo '```'
     echo ""
     echo "### 3. Neo 11 \`system\` 占用前 30 目录/大包（精简瘦身参考）"
