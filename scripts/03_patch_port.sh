@@ -91,7 +91,9 @@ apply_remove_list() {
 mount_erofs_ro() {
   local img="$1" mnt="$2"
   mkdir -p "$mnt"
-  sudo mount -t erofs -o ro,loop "$img" "$mnt"
+  if ! sudo mount -t erofs -o ro,loop "$img" "$mnt" 2>/dev/null; then
+    sudo mount -o ro,loop "$img" "$mnt"
+  fi
   ACTIVE_MOUNTS+=("$mnt")
 }
 
@@ -231,17 +233,26 @@ OEM_ZIP="$(find "$WORK_ROOT/neo11_oem_vgc" -maxdepth 3 -name 'oem_*.zip' | head 
 
 mkdir -p "$WORK_ROOT/neo11_vgc_raw" "$WORK_ROOT/neo11_oem_raw"
 unzip -o -j "$VGC_ZIP" "payload.bin" -d "$WORK_ROOT/neo11_vgc_raw"
-payload-dumper-go -c 2 -o "$WORK_ROOT/neo11_vgc_raw/parts" "$WORK_ROOT/neo11_vgc_raw/payload.bin"
+payload-dumper-go -c 2 -p vgc -o "$WORK_ROOT/neo11_vgc_raw/parts" "$WORK_ROOT/neo11_vgc_raw/payload.bin"
 rm -f "$WORK_ROOT/neo11_vgc_raw/payload.bin"
 
 unzip -o -j "$OEM_ZIP" "payload.bin" -d "$WORK_ROOT/neo11_oem_raw"
-payload-dumper-go -c 2 -o "$WORK_ROOT/neo11_oem_raw/parts" "$WORK_ROOT/neo11_oem_raw/payload.bin"
+payload-dumper-go -c 2 -p oem -o "$WORK_ROOT/neo11_oem_raw/parts" "$WORK_ROOT/neo11_oem_raw/payload.bin"
 rm -f "$WORK_ROOT/neo11_oem_raw/payload.bin"
 rm -rf "$WORK_ROOT/neo11_oem_vgc"
 
-VGC_IMG="$(find "$WORK_ROOT/neo11_vgc_raw/parts" -name '*.img' | head -n 1)"
-OEM_IMG="$(find "$WORK_ROOT/neo11_oem_raw/parts" -name '*.img' | head -n 1)"
-echo "[Neo11] Nested images ready: vgc=$(basename "$VGC_IMG"), oem=$(basename "$OEM_IMG")"
+VGC_IMG="$(find "$WORK_ROOT/neo11_vgc_raw/parts" -name 'vgc.img' | head -n 1 || true)"
+if [[ -z "$VGC_IMG" ]]; then
+  VGC_IMG="$(find "$WORK_ROOT/neo11_vgc_raw/parts" -name '*.img' ! -name 'vbmeta*' | head -n 1 || true)"
+fi
+OEM_IMG="$(find "$WORK_ROOT/neo11_oem_raw/parts" -name 'oem.img' | head -n 1 || true)"
+if [[ -z "$OEM_IMG" ]]; then
+  OEM_IMG="$(find "$WORK_ROOT/neo11_oem_raw/parts" -name '*.img' ! -name 'vbmeta*' | head -n 1 || true)"
+fi
+[[ -n "$VGC_IMG" && -f "$VGC_IMG" ]] || { echo "[FATAL] vgc.img not found in neo11_vgc_raw/parts!"; ls -la "$WORK_ROOT/neo11_vgc_raw/parts"; exit 1; }
+[[ -n "$OEM_IMG" && -f "$OEM_IMG" ]] || { echo "[FATAL] oem.img not found in neo11_oem_raw/parts!"; ls -la "$WORK_ROOT/neo11_oem_raw/parts"; exit 1; }
+echo "[Neo11] Nested images ready: vgc=$(basename "$VGC_IMG") ($(du -h "$VGC_IMG" | awk '{print $1}')), oem=$(basename "$OEM_IMG") ($(du -h "$OEM_IMG" | awk '{print $1}'))"
+file "$VGC_IMG" "$OEM_IMG" || true
 df -h "$WORK_ROOT"
 
 # ------------------------------------------------------------------------------
@@ -262,10 +273,10 @@ mount_erofs_ro "$OEM_IMG" "$MNT_OEM"
 echo "[Diag] Recording /system/custom/app & vivo init.rc contents into build report..."
 {
   echo "=== /system/custom/app ==="
-  sudo du -sm "$MNT_SYS/system/custom/app"/* 2>/dev/null | sort -rn || true
+  sudo find "$MNT_SYS/system/custom/app" -mindepth 1 -maxdepth 1 -exec du -sm {} + 2>/dev/null | sort -rn || true
   echo ""
   echo "=== /system/custom/priv-app ==="
-  sudo du -sm "$MNT_SYS/system/custom/priv-app"/* 2>/dev/null | sort -rn || true
+  sudo find "$MNT_SYS/system/custom/priv-app" -mindepth 1 -maxdepth 1 -exec du -sm {} + 2>/dev/null | sort -rn || true
 } > "$REPORT_DIR/neo11_custom_apps.txt"
 
 {
@@ -526,6 +537,7 @@ sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" fixup "$STAGE_SYS" --default-s
 
 # --- C5. Repack & Verify system.img ---
 echo "[Pack] Repacking system.img with mkfs.erofs -z$EROFS_COMPRESS..."
+sudo rm -f "$OUT_DIR/system.img"
 sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/system.img" "$STAGE_SYS"
 sudo rm -rf "$STAGE_SYS"
 
@@ -576,6 +588,7 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
   sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" fixup "$STAGE_PROD" --default-selinux "u:object_r:system_file:s0"
 
   echo "[Pack] Repacking product.img with mkfs.erofs -z$EROFS_COMPRESS..."
+  sudo rm -f "$OUT_DIR/product.img"
   sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/product.img" "$STAGE_PROD"
   sudo rm -rf "$STAGE_PROD"
 
@@ -599,6 +612,7 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
   sudo chown 0:0 "$EMPTY_DIR"
   sudo chmod 0755 "$EMPTY_DIR"
   sudo python3 -c 'import os,sys; os.setxattr(sys.argv[1],"security.selinux",b"u:object_r:system_file:s0\x00")' "$EMPTY_DIR"
+  sudo rm -f "$OUT_DIR/mi_ext.img" "$OUT_DIR/mi_product.img"
   sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/mi_ext.img" "$EMPTY_DIR"
   sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/mi_product.img" "$EMPTY_DIR"
   sudo rm -rf "$EMPTY_DIR"

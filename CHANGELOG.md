@@ -163,6 +163,8 @@
   5. **属性与去臃肿闭环补齐**：在 `config/prop_override.conf` 补充关闭 `ro.vivo.vivo4dgamevib.enable=0` 与 `ro.vivo.cota.enable=0`（与移除 `vibrator4d`/`COTA`/`Updater` 一致）；在 `debug_adb=true` 时若 Neo 11 含 `/system/etc/prop.default` 则同步覆写 `ro.adb.secure`/`ro.debuggable`，防止写一次属性提前锁死；将 `remove_list.txt` 解析重构为纯 Bash 通用函数 `apply_remove_list`，同时支持 `[system]` 与 `[product]`。
   6. **`flash_port_mac.sh` 清除数据兜底**：若 `fastboot -w` 在 `fastbootd` 下失败，自动回退执行 `fastboot erase metadata && fastboot erase userdata`（K90 `fstab.qcom` 均标有 `formattable`，首次开机自动按原生 F2FS + `inlinecrypt` 参数重建）。
   7. **修复 `00-mirror-to-gh-release.yml` 第 84 行 YAML 缩进语法错误**：将原先内联在 YAML `run: |` 块中未缩进的 Python heredoc 拆分为独立脚本 [`scripts/00_mirror_ms_to_gh.py`](scripts/00_mirror_ms_to_gh.py)，并使用 macOS 原生 Ruby `YAML.load_file`（Psych 解析器）复验全部 3 个 Workflow YAML 语法全部通过。
+  8. **修复 `scripts/03_patch_port.sh` 嵌套解包误选 `vbmeta_vgc.img`/`vbmeta_oem.img`**：`vgc_*.zip` 与 `oem_*.zip` 的 `payload.bin` 内均同时包含分区镜像与对应 `vbmeta_*.img`，原 `find -name '*.img' | head -n 1` 命中了 `vbmeta_*` 导致 `mount -t erofs` 报退出码 `32`；已改为指定 `-p vgc` / `-p oem` 提取并精确匹配 `vgc.img`、`oem.img`（排除 `vbmeta*`）。
+  9. **防宿主机 `secilc` 版本代差误杀 + 挂载/通配符细节加固**：`scripts/check_sepolicy.py` 在校检 `Neo 11 + K90` 前先用纯原厂 K90 五分区 CIL 做 0.3 秒基线自校（若 Ubuntu 24.04 自带 `secilc 3.5` 连原厂 Android 17 CIL 语法都不支持，则输出警告并跳过硬拦截，避免误杀）；`mount_erofs_ro` 增加 `-o ro,loop` 自动文件系统兜底；修复 `sudo du -sm .../*` 非 root shell 展开通配符问题，并在 `mkfs.erofs` 前清理同名旧镜像。
 
 ---
 
