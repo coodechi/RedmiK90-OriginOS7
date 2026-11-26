@@ -1,0 +1,58 @@
+name: 01 - Inspect K90 & Neo 11 ROMs (Cloud Metadata & VINTF Diff)
+
+on:
+  workflow_dispatch:
+    inputs:
+      stock_rom_source:
+        description: "K90 底包来源：默认小米官方 CDN 直链（免费免上传），也可填 ms://<魔搭用户名>/<数据集名>/<文件>"
+        required: true
+        default: "https://cdnorg.d.miui.com/OS4.0.6.0.XPKCNXM/annibale_images_OS4.0.6.0.XPKCNXM_20261026.0000.00_17.0_cn_8129267a3b.tgz"
+        type: string
+      port_rom_source:
+        description: "iQOO Neo 11 源包来源：填 ms://<魔搭用户名>/<私有数据集名>/PD2520A_17.1.15.2W10.V000L1-update-full.zip.parts.json（支持分卷清单或单文件）"
+        required: true
+        default: "ms://<YOUR_MS_USERNAME>/redmi-k90-roms/PD2520A_17.1.15.2W10.V000L1-update-full.zip.parts.json"
+        type: string
+
+jobs:
+  inspect:
+    runs-on: ubuntu-latest
+    timeout-minutes: 90
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Clean runner disk and select largest workspace
+        run: bash scripts/00_clean_runner_disk.sh
+
+      - name: Install inspection toolchain
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            aria2 erofs-utils android-sdk-libsparse-utils \
+            xz-utils brotli unzip jq file python3 python3-pip
+          python3 -m pip install --break-system-packages -q "modelscope-hub>=0.5.0"
+          curl -fsSL "https://github.com/ssut/payload-dumper-go/releases/download/2.1.0/payload-dumper-go_2.1.0_linux_amd64.tar.gz" \
+            -o /tmp/pdg.tar.gz
+          sudo tar -xzf /tmp/pdg.tar.gz -C /usr/local/bin payload-dumper-go
+          sudo chmod +x /usr/local/bin/payload-dumper-go
+          rm -f /tmp/pdg.tar.gz
+          payload-dumper-go -v || true
+
+      - name: Run dual-ROM cloud inspection & VINTF diff
+        env:
+          MODELSCOPE_API_TOKEN: ${{ secrets.MODELSCOPE_API_TOKEN }}
+          HF_TOKEN: ${{ secrets.HF_TOKEN }}
+          STOCK_SOURCE: ${{ inputs.stock_rom_source }}
+          PORT_SOURCE: ${{ inputs.port_rom_source }}
+        run: bash scripts/02_inspect_roms.sh
+
+      - name: Upload lightweight inspection report artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: k90-neo11-inspection-report
+          path: ${{ env.WORK_ROOT }}/report
+          retention-days: 14
+          if-no-files-found: warn

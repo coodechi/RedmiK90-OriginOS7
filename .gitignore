@@ -1,0 +1,32 @@
+# ROM packages & large binary images (NEVER commit to Git!)
+*.tgz
+*.tar
+*.tar.gz
+*.tar.zst
+*.tar.zst.part*
+*.zip
+*.img
+*.bin
+*.elf
+*.mbn
+*.br
+*.dat
+
+# Local workspace / working directories / private device backups / logs
+roms/
+work/
+out/
+backups/
+logs/
+tmp/
+.ms_parts_*/
+
+# Local secret / helper scripts (NEVER commit tokens!)
+upload.sh
+*.local.sh
+.env
+.env.*
+
+# macOS junk
+.DS_Store
+._*
