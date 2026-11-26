@@ -162,6 +162,7 @@
   4. **`system_only` 增量构建 SEPolicy Shim 持久化机制**：支持可选仓库跟踪文件 `config/sepolicy_shims.cil`，在 `full` 与 `system_only` 两种模式下均会注入 `mapping/202404.cil`，避免首版 `full` 产出的跨厂 SELinux 兼容垫片在后续 `system_only` 快速构建时丢失。
   5. **属性与去臃肿闭环补齐**：在 `config/prop_override.conf` 补充关闭 `ro.vivo.vivo4dgamevib.enable=0` 与 `ro.vivo.cota.enable=0`（与移除 `vibrator4d`/`COTA`/`Updater` 一致）；在 `debug_adb=true` 时若 Neo 11 含 `/system/etc/prop.default` 则同步覆写 `ro.adb.secure`/`ro.debuggable`，防止写一次属性提前锁死；将 `remove_list.txt` 解析重构为纯 Bash 通用函数 `apply_remove_list`，同时支持 `[system]` 与 `[product]`。
   6. **`flash_port_mac.sh` 清除数据兜底**：若 `fastboot -w` 在 `fastbootd` 下失败，自动回退执行 `fastboot erase metadata && fastboot erase userdata`（K90 `fstab.qcom` 均标有 `formattable`，首次开机自动按原生 F2FS + `inlinecrypt` 参数重建）。
+  7. **修复 `00-mirror-to-gh-release.yml` 第 84 行 YAML 缩进语法错误**：将原先内联在 YAML `run: |` 块中未缩进的 Python heredoc 拆分为独立脚本 [`scripts/00_mirror_ms_to_gh.py`](scripts/00_mirror_ms_to_gh.py)，并使用 macOS 原生 Ruby `YAML.load_file`（Psych 解析器）复验全部 3 个 Workflow YAML 语法全部通过。
 
 ---
 

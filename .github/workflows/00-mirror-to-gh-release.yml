@@ -80,81 +80,11 @@ jobs:
           CACHE_DIR="$WORK_ROOT/ms_cache"
           mkdir -p "$MIRROR_DIR" "$CACHE_DIR"
 
-          python3 - "$SRC" "$MIRROR_DIR" "$CACHE_DIR" "$WORK_ROOT/manifest_name.txt" <<'PYEOF'
-import concurrent.futures, hashlib, json, os, shutil, sys, time
-from modelscope_hub import HubApi
-
-src, mirror_dir, cache_dir, manifest_out = sys.argv[1:5]
-rest = src[len("ms://"):]
-parts_split = rest.split("/", 2)
-if len(parts_split) < 3:
-    raise SystemExit("Invalid ms:// URI, expected ms://<owner>/<dataset>/<path>")
-repo_id = f"{parts_split[0]}/{parts_split[1]}"
-file_path = parts_split[2]
-if not file_path.endswith(".parts.json"):
-    raise SystemExit("Expected a .parts.json chunked manifest on ModelScope!")
-
-token = os.environ["MODELSCOPE_API_TOKEN"]
-endpoint = os.environ.get("MODELSCOPE_ENDPOINT") or "https://modelscope.cn"
-api = HubApi(token=token, endpoint=endpoint)
-
-print(f"[Mirror] Fetching manifest {os.path.basename(file_path)} ...", file=sys.stderr, flush=True)
-m_local = str(api.download_file(repo_id, "dataset", file_path, revision="master", local_dir=cache_dir))
-manifest_name = os.path.basename(file_path)
-shutil.copy2(m_local, os.path.join(mirror_dir, manifest_name))
-
-with open(m_local, "r", encoding="utf-8") as f:
-    meta = json.load(f)
-
-chunk_list = meta["parts"]
-remote_dir = os.path.dirname(file_path)
-workers = min(6, len(chunk_list))
-print(f"[Mirror] Downloading {len(chunk_list)} chunks in parallel (workers={workers})...", file=sys.stderr, flush=True)
-
-def dl_one(idx_part):
-    idx, p = idx_part
-    fname = p.get("name") or p.get("filename")
-    candidates = [f"parts/{fname}"]
-    if remote_dir:
-        candidates.append(f"{remote_dir}/{fname}")
-    candidates.append(fname)
-
-    for attempt in range(1, 5):
-        local_api = HubApi(token=token, endpoint=endpoint)
-        last_err = None
-        for rpath in candidates:
-            try:
-                t0 = time.time()
-                print(f"  [{idx}/{len(chunk_list)}] Downloading {fname} (attempt {attempt})...", file=sys.stderr, flush=True)
-                lp = str(local_api.download_file(repo_id, "dataset", rpath, revision="master", local_dir=cache_dir))
-                h = hashlib.sha256()
-                with open(lp, "rb") as fp:
-                    for blk in iter(lambda: fp.read(8 * 1024 * 1024), b""):
-                        h.update(blk)
-                if h.hexdigest() != p["sha256"]:
-                    raise RuntimeError(f"SHA256 mismatch on {fname}")
-                dst = os.path.join(mirror_dir, fname)
-                shutil.move(lp, dst)
-                dt = max(time.time() - t0, 0.1)
-                sz_mb = os.path.getsize(dst) / (1024 * 1024)
-                print(f"  [{idx}/{len(chunk_list)}] Verified {fname} ({sz_mb:.1f} MiB in {dt:.1f}s)", file=sys.stderr, flush=True)
-                return fname
-            except Exception as e:
-                last_err = e
-                continue
-        print(f"  [WARN] {fname} attempt {attempt}/4 failed: {last_err}", file=sys.stderr, flush=True)
-        if attempt == 4:
-            raise last_err
-        time.sleep(attempt * 5)
-
-with concurrent.futures.ThreadPoolExecutor(max_workers=workers) as ex:
-    futs = [ex.submit(dl_one, (i, p)) for i, p in enumerate(chunk_list, 1)]
-    for fut in concurrent.futures.as_completed(futs):
-        fut.result()
-
-with open(manifest_out, "w", encoding="utf-8") as mf:
-    mf.write(manifest_name + "\n")
-PYEOF
+          python3 scripts/00_mirror_ms_to_gh.py \
+            --src "$SRC" \
+            --mirror-dir "$MIRROR_DIR" \
+            --cache-dir "$CACHE_DIR" \
+            --manifest-out "$WORK_ROOT/manifest_name.txt"
           MANIFEST_NAME="$(tr -d '\r\n' < "$WORK_ROOT/manifest_name.txt")"
 
           echo "[Mirror] Uploading assets to Private GitHub Release (internal GitHub backbone speed)..."
