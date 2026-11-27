@@ -852,10 +852,13 @@ PYEOF
   MNT_EXT="$WORK_ROOT/mnt/neo11_system_ext"
   mount_erofs_ro "$WORK_ROOT/neo11_parts/system_ext.img" "$MNT_EXT"
   EXT_ACTION=""
+  # 注意：不要用 `find ... | grep -q .`，pipefail 下 grep 提前退出会让 find 收到
+  # SIGPIPE（141）从而把整条管道判为失败，导致漏判。这里取首个匹配结果再判空。
+  EXT_DEV_XML="$(sudo find "$MNT_EXT/etc/vintf" -maxdepth 1 -type f -name '*device*.xml' 2>/dev/null | head -n 1 || true)"
   if [[ "$ALIGN_K90_VINTF" == "true" ]]; then
     if sudo test -d "$WORK_ROOT/k90_assets/system_ext_vintf"; then
       EXT_ACTION="vintf<-k90"
-    elif sudo find "$MNT_EXT/etc/vintf" -maxdepth 1 -type f -name '*device*.xml' 2>/dev/null | grep -q .; then
+    elif [[ -n "$EXT_DEV_XML" ]]; then
       EXT_ACTION="vintf:drop-device"
     fi
   fi
