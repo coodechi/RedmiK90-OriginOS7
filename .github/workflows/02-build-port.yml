@@ -56,7 +56,9 @@ jobs:
     # runner 用户对 / 无写权限 -> mkdir 立即失败；artifact path 也指向不存在的
     # /build_report，于是每次下载到的都是同名空目录，永远分不清是哪个 build_tag。
     env:
-      WORK_ROOT: ${{ runner.temp }}/rom_work
+      # 注意：runner 上下文在 job 级 env 中不可用（会报 Unrecognized named-value: 'runner'），
+      # 这里必须用字面路径；step 内仍可用 $RUNNER_TEMP。
+      WORK_ROOT: /tmp/rom_work
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -174,7 +176,7 @@ jobs:
           set -uo pipefail
           ART_NAME="k90-originos7-build-report-${{ inputs.build_tag }}-run${{ github.run_number }}"
           SRC="$WORK_ROOT/build_report"
-          DST="$RUNNER_TEMP/$ART_NAME"
+          DST="/tmp/artifact/$ART_NAME"
           rm -rf "$DST"
           mkdir -p "$DST"
           if [[ -d "$SRC" ]] && [[ -n "$(ls -A "$SRC" 2>/dev/null)" ]]; then
@@ -200,7 +202,7 @@ jobs:
         uses: actions/upload-artifact@v4
         with:
           name: k90-originos7-build-report-${{ inputs.build_tag }}-run${{ github.run_number }}
-          path: ${{ runner.temp }}/k90-originos7-build-report-${{ inputs.build_tag }}-run${{ github.run_number }}
+          path: /tmp/artifact/k90-originos7-build-report-${{ inputs.build_tag }}-run${{ github.run_number }}
           retention-days: 30
 
       - name: Write GitHub Step Summary
