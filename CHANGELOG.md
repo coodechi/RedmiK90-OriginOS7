@@ -176,6 +176,48 @@
   1. **打通真实 `secilc` 跨厂策略合编（`scripts/check_sepolicy.py`）**：`v0.1` 报告显示 Ubuntu 24.04 自带 `secilc 3.5` 仅卡在 Android 17 新增的 `(policycap functionfs_seclabel)` 而提前跳出基线校验；现改为在临时镜像目录按 1:1 行号注释掉宿主机不认识的 `policycap`（不修改 ROM 内真实 `plat_sepolicy.cil`），使纯原厂 K90 基线真正通过后再执行 `Neo 11 + K90` 真跨厂合编与自动 shim（最大轮次提升至 `100`，并补齐 `class`/`roleattribute`/`typealias`/`typebounds`/`typepermissive` 识别）。
   2. **精细保留 OriginOS 原生核心应用（`config/remove_list.txt`）**：根据实测 `neo11_custom_apps.txt` 清单，将全清空 `system/custom/app/*` 改为精确名单移除 42 项非核心体积大户（含 `JoviCopilot`/`SmartOffice`/`ihealth`/`vivogame`/`Baidu` 等），保留 20 款 OriginOS 原生核心应用（`VivoGallery`/`VivoPhoto`/`VideoPlayer`/`BBKMusic`/`IqooSecure`/`BBKNotes`/`BBKWeather`/`BBKTheme`/`VivoCalendar`/`BBKSoundRecorder`/`BBKTimer`/`BBKCalculator`/`Compass`/`SmartRemote` 及配套组件），兼顾完整体验与 ~400+ MiB 富余空间。
 
+#### Step 16：新版全量构包验收全部通过（实测 `secilc` 零垫片一轮合编成功，具备首刷点亮条件）
+- **实测报告验收（`2026-11-27 01:35:21 UTC`）**：
+  - **跨厂 SEPolicy 真合编门禁（`sepolicy_check.txt`）**：临时过滤 `functionfs_seclabel` 后，纯原厂 K90 基线 PASS；**Neo 11（`system`+`system_ext`+`product`）+ K90（`vendor`+`odm`）共 11 个 CIL 文件第 1 轮即一次编出 `1,900,326 bytes` 二进制策略，`shims_added=0`**，无任何缺失类型或重定义冲突。
+  - **Super 容量门禁（`BUILD_INFO.txt`）**：保留全部 20 款 OriginOS 核心原生应用后，`system.img` = `7,959.03 MiB`，总占用 **`12.194 GiB / 12.490 GiB`**，剩余 **`303.09 MiB`** 安全余量。
+  - **EROFS 与标签校验**：`system.img`（`20,924/20,924 = 100.00%`、`capabilities=2`）、`product.img`（`311/311 = 100.00%`，含 K90 `display_id_4630947238302509459.xml`）、`system_ext.img`（`1,954/1,954 = 100.00%`）、`mi_ext.img`（`1/1 = 100.00%`）。
+  - **精简清单（`removed_items.txt`）**：48 条目标项全部精准命中删除（零 `SKIP MISSING`）。
+  - **结论**：所有云端预检门禁全部绿灯，可进入 macOS 拉包与实机 `fastbootd` 首次点亮测试。
+
+#### Step 17：新增刷机后一键监测与全量诊断脚本
+- 新增 [`scripts/local_post_flash_diag.sh`](scripts/local_post_flash_diag.sh)（macOS 一键运行）：
+  - 若设备仍停在 Fastboot/Fastbootd，提示一键 `fastboot reboot`；
+  - 自动以断线重连循环持续录制全量 `adb logcat -b all`（即使首刷重启多次也能保留全部启动片段）；
+  - 实时监测 `sys.boot_completed` 与 `init.svc.bootanim`，开机完成后自动采集 `getprop`、`mount`、`dmesg`、`/sys/fs/pstore`、`service list` 以及显示/屏下指纹/相机/音频/马达/NFC/Wi-Fi/通信 HAL 状态；
+  - 自动去重聚合 `SELinux AVC denied`、提取 `FATAL`/崩溃/缺失 HAL 报错并生成一页式 `SUMMARY.txt`（全部落盘至已 gitignore 的 `logs/post_flash_<tag>_<timestamp>/`）。
+
+#### Step 18：实机排障修复 REDMI K90 `vbmeta` 关 AVB 与 `fastbootd` 启动顺序冲突
+- **实机现象**：`flash_port_mac.sh` 先在 bootloader 用 `--disable-verity --disable-verification` 写入 `vbmeta_b` 后执行 `fastboot reboot fastboot`，K90（SM8750）ABL 拒绝拉起 `recovery_b`/`fastbootd` 并将槽位标为 `slot-unbootable:b: yes`；恢复未改写的原版 `vbmeta_b` + `fastboot set_active b` 后 13s 顺利进入 `fastbootd`。
+- **修复**（同步更新 `scripts/03_patch_port.sh` 生成模板及本地 `out/v0.1-bringup/port_bundle/flash_port_mac.sh`）：
+  - 调整刷写顺序为：**先进 `fastbootd`（若从 bootloader 启动先写回原版 `vbmeta` 并 `set_active` 保底）-> 缩放并刷写全部动态分区 -> 切回 bootloader 关 AVB 写 `vbmeta`/`vbmeta_system` 并 `set_active` -> 清数据 `fastboot -w` -> 重启开机**。
+
+#### Step 19：实机二次排障锁定两大关键根因（`--disable-verity` 与 Virtual A/B 未合并 `-cow` 损坏 `vendor`/`odm`）
+- **发现 1（K90 SM8750 AVB 特性）**：`--disable-verity --disable-verification`（`flags=3`）会导致 K90 ABL 跳过加载 `init_boot`/`vendor_boot`/`dtbo`/`pvmfw` 而秒退红色 FASTBOOT；仅使用 `--disable-verity`（`flags=1`）可正常拉起内核。同步更新 `scripts/03_patch_port.sh` 刷机模板为 `--disable-verity`。
+- **发现 2（3~5 秒 Redmi Logo 无限重启根因）**：`fastbootd` 分区表检出 `odm_b-cow`（86 MB）、`vendor_b-cow`（16 MB）、`vendor_dlkm_b-cow`（7 MB）、`system_dlkm_b-cow`（4.5 MB）四个未合并的 Virtual A/B OTA 差分快照分区。执行 `fastboot -w` 清空 `/metadata` 后丢失了 `snapuserd` 合并表，导致 `odm_b`/`vendor_b`/`vendor_dlkm_b`/`system_dlkm_b` 缺块损坏、`first_stage_init` 挂载 `/vendor` 失败即刻 panic 重启。
+- **修复**：从本地 `OS4.0.6.0.XPKCNXM` 线刷包无损解出干净完整的 `vendor_a.img`/`odm_a.img`/`vendor_dlkm_a.img`/`system_dlkm_a.img`，删除残留 `*-cow` 后直接写回 `_b` 槽，并在 `scripts/03_patch_port.sh` 中增加未合并 `*-cow` 分区预检警告。
+
+#### Step 20：v0.2 —— K90-BASE ALIGNMENT（VINTF/SEPolicy/机型身份回归底包）
+- **动机（三次根因复盘结论）**：`compatibility_matrix` 与 `plat_sepolicy` 描述的是 **vendor 侧的形状**，必须与 vendor 同源。v0.1 把 OriginOS 的 `system/etc/vintf` 与 `system/etc/selinux` 整体搬过来、却保留 K90 的 `vendor`/`odm`，必然触发两处硬失败：
+  1. `system_server` 的 `VintfObject::CheckCompatibility` → `FATAL` → 重启循环（`compatibility_matrix.device.xml` 里上百条 `vendor.vivo.hardware.*` 标 required）；
+  2. `init` 的 `selinux_android_load_policy()` 失败后进入 `Freeze()`（用户态死循环）→ **卡开机 logo、无 adb、无 kmsg、无 panic**，与实机现象完全吻合。
+- **同时修复的三处"合编校验但未落地"缺陷**：
+  - `scripts/check_sepolicy.py` 合编产物此前只写到临时目录并在 `shutil.rmtree()` 后丢弃；
+  - `config/vintf_relax.json` 从未创建，`03_patch_port.sh` 也从未引用；
+  - `config/sepolicy_shims.cil` 不存在，`mapping/202404.cil` 的 shim 分支实为死代码。
+- **实现（`scripts/03_patch_port.sh`）**：
+  - Phase A 新增持久档提取：K90 原厂 `system/etc/{vintf,selinux}`、`system_ext/etc/{vintf,selinux}`、`product/etc/{vintf,selinux}` 与 `product/build.prop` → `k90_assets/`（不再随 `k90_sepolicy` 删除）。
+  - 新增 **C4.6 K90-BASE ALIGNMENT**：把 staged `system/etc/{vintf,selinux}` 整体换回 K90 原厂；`system_only` 模式缺资产时 fail-fast 并给出指引。
+  - Phase D / D2：product 与 system_ext 的 `etc/{vintf,selinux}` 同样替换为 K90 原厂对应目录（**替换而非删除**，保证 `precompiled_sepolicy` 的 `*_sepolicy.cil.sha256` 侧文件集合完整、命中预编译路径，避免 fallback 运行时 `secilc` 失败）。system_ext 无差异时仍走原样 passthrough，省一次重打包。
+  - 新增 **D1b device identity masking**：按 K90 原厂 `product/build.prop` 覆写 OriginOS product 的 `ro.product.product.{device,name,model,brand,manufacturer}`，修掉 `property_source_order` 以 product 为首选导致的 `ro.product.device=PD2520`。产物快照写入 `build_report/patched_product_build.prop`。
+  - 新增报告 `build_report/k90_base_alignment.txt`（部署清单 + `plat_sepolicy_vers` + mapping 命中情况）；`BUILD_INFO.txt` 增加 `K90 Align` / `Device Mask` 字段。
+- **开关**：`ALIGN_K90_BASE=all|vintf|selinux|none`（默认 `all`）、`MASK_DEVICE=annibale|none`（默认 `annibale`）；已接入 `.github/workflows/02-build-port.yml` 的 `align_k90_base` 下拉输入，便于 A/B 对照。
+- **预期效果**：消掉两处必然失败（SELinux Freeze、VINTF FATAL）；OriginOS 应用会大量落在外来 domain → permissive 下仅告警，属第一版可接受代价。
+
 ---
 
 ## 待补操作清单（Pending / Next Steps）

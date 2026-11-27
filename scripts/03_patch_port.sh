@@ -26,6 +26,27 @@ BUILD_SCOPE="${BUILD_SCOPE:-full}"          # full | system_only
 DEBUG_ADB="${DEBUG_ADB:-true}"              # true | false
 EROFS_COMPRESS="${EROFS_COMPRESS:-$DEFAULT_EROFS_COMPRESS}"
 
+# ------------------------------------------------------------------------------
+# K90-BASE ALIGNMENT (v0.2)
+#   compatibility_matrix / plat_sepolicy 描述的是 vendor 侧的形状，必须来自 vendor
+#   自己的底包。把外来 system 的矩阵+策略和 K90 vendor 拼在一起，必炸在：
+#     1) system_server: VintfObject::CheckCompatibility -> FATAL -> 重启循环
+#     2) init: selinux_android_load_policy() 失败 -> Freeze() 死循环
+#        （表现：卡开机 logo、无 adb、无 kmsg、无 panic）
+#   因此默认强制把 system/etc/{vintf,selinux} 换回 K90 原厂，并删除外来 device 矩阵。
+#   all | vintf | selinux | none
+# ------------------------------------------------------------------------------
+ALIGN_K90_BASE="${ALIGN_K90_BASE:-all}"
+case "$ALIGN_K90_BASE" in
+  all)     ALIGN_K90_VINTF=true;  ALIGN_K90_SELINUX=true ;;
+  vintf)   ALIGN_K90_VINTF=true;  ALIGN_K90_SELINUX=false ;;
+  selinux) ALIGN_K90_VINTF=false; ALIGN_K90_SELINUX=true ;;
+  none)    ALIGN_K90_VINTF=false; ALIGN_K90_SELINUX=false ;;
+  *) echo "[FATAL] ALIGN_K90_BASE must be one of: all|vintf|selinux|none (got '$ALIGN_K90_BASE')"; exit 1 ;;
+esac
+# annibale | none  —— 把 product/build.prop 的 ro.product.product.* 伪装成 K90
+MASK_DEVICE="${MASK_DEVICE:-annibale}"
+
 mkdir -p "$WORK_ROOT" "$REPORT_DIR" "$OUT_DIR"
 
 # Cleanup any active loop mounts on exit
@@ -110,6 +131,8 @@ echo "  Tag:      $BUILD_TAG"
 echo "  Scope:    $BUILD_SCOPE"
 echo "  DebugADB: $DEBUG_ADB"
 echo "  Compress: $EROFS_COMPRESS"
+echo "  AlignK90: $ALIGN_K90_BASE (vintf=$ALIGN_K90_VINTF selinux=$ALIGN_K90_SELINUX)"
+echo "  MaskDev : $MASK_DEVICE"
 echo "  WorkRoot: $WORK_ROOT"
 echo "=================================================================="
 df -Th "$WORK_ROOT"
@@ -175,6 +198,21 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
   if sudo test -d "$WORK_ROOT/k90_mnt/product/etc/selinux"; then
     sudo cp -r "$WORK_ROOT/k90_mnt/product/etc/selinux" "$WORK_ROOT/k90_sepolicy/product"
   fi
+  # K90 product 的 VINTF/SEPolicy 持久档（用于替换 OriginOS product 的同名目录，
+  # 保持 CIL 文件集合与 precompiled_sepolicy 的 sha256 侧文件完全一致）
+  for sub in vintf selinux; do
+    if sudo test -d "$WORK_ROOT/k90_mnt/product/etc/$sub"; then
+      sudo rm -rf "$WORK_ROOT/k90_assets/product_$sub"
+      sudo cp -a "$WORK_ROOT/k90_mnt/product/etc/$sub" "$WORK_ROOT/k90_assets/product_$sub"
+      echo "[K90] Persisted product/etc/$sub for base alignment"
+    fi
+  done
+  # Product build.prop → 用于 device identity 伪装（ro.product.product.* 是
+  # property_source_order 的首选来源，决定最终 ro.product.device/model/name）
+  if sudo test -f "$WORK_ROOT/k90_mnt/product/build.prop"; then
+    sudo cp "$WORK_ROOT/k90_mnt/product/build.prop" "$WORK_ROOT/k90_assets/k90_product_build.prop"
+    echo "[K90] Persisted product/build.prop for device identity masking"
+  fi
   umount_erofs "$WORK_ROOT/k90_mnt/product"
   rm -f "$WORK_ROOT/k90_parts/product_a.img"
 
@@ -187,11 +225,33 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
       elif sudo test -d "$WORK_ROOT/k90_mnt/$kp/etc/selinux"; then
         sudo cp -r "$WORK_ROOT/k90_mnt/$kp/etc/selinux" "$WORK_ROOT/k90_sepolicy/$kp"
       fi
+      # K90 stock framework VINTF + SEPolicy → 持久档（不随 k90_sepolicy 删除），
+      # 供 Phase C 的 K90-BASE ALIGNMENT 覆盖外来 system 使用。
+      if [[ "$kp" == "system" ]]; then
+        for sub in vintf selinux; do
+          if sudo test -d "$WORK_ROOT/k90_mnt/$kp/system/etc/$sub"; then
+            sudo rm -rf "$WORK_ROOT/k90_assets/$sub"
+            sudo cp -a "$WORK_ROOT/k90_mnt/$kp/system/etc/$sub" "$WORK_ROOT/k90_assets/$sub"
+            echo "[K90] Persisted system/etc/$sub ($(sudo du -sh "$WORK_ROOT/k90_mnt/$kp/system/etc/$sub" | awk '{print $1}')) for base alignment"
+          else
+            echo "[WARN] K90 stock system/etc/$sub not found — base alignment may be incomplete"
+          fi
+        done
+      fi
+      if [[ "$kp" == "system_ext" ]]; then
+        for sub in vintf selinux; do
+          if sudo test -d "$WORK_ROOT/k90_mnt/$kp/etc/$sub"; then
+            sudo rm -rf "$WORK_ROOT/k90_assets/system_ext_$sub"
+            sudo cp -a "$WORK_ROOT/k90_mnt/$kp/etc/$sub" "$WORK_ROOT/k90_assets/system_ext_$sub"
+            echo "[K90] Persisted system_ext/etc/$sub for base alignment"
+          fi
+        done
+      fi
       umount_erofs "$WORK_ROOT/k90_mnt/$kp"
       rm -f "$WORK_ROOT/k90_parts/${kp}_a.img"
     fi
   done
-  sudo chown -R "$(id -u):$(id -g)" "$WORK_ROOT/k90_sepolicy"
+  sudo chown -R "$(id -u):$(id -g)" "$WORK_ROOT/k90_sepolicy" "$WORK_ROOT/k90_assets"
   echo "[K90] Extracted SEPolicy CIL trees for secilc pre-flight verification."
 
   rm -rf "$WORK_ROOT/k90_parts" "$WORK_ROOT/k90_mnt"
@@ -538,6 +598,60 @@ else
   echo "[WARN] Skipping live secilc check (system_only mode has no K90 vendor/odm CILs). Ensure any required shims from full build are pinned in config/sepolicy_shims.cil!"
 fi
 
+# --- C4.6. K90-BASE ALIGNMENT: 把 framework VINTF / SEPolicy 换回 K90 原厂 ---
+# 依据：这两个东西描述的是 vendor 侧的形状，必须与 vendor 同源。混用外来 system 的
+# 矩阵+策略，必然出现：system_server CheckCompatibility FATAL；或 init 在
+# selinux_android_load_policy() 失败后 Freeze() 死循环（卡 logo / 无 kmsg / 无 panic）。
+ALIGN_LOG="$REPORT_DIR/k90_base_alignment.txt"
+{
+  echo "=== K90 base alignment ==="
+  echo "ALIGN_K90_BASE    = $ALIGN_K90_BASE"
+  echo "ALIGN_K90_VINTF   = $ALIGN_K90_VINTF"
+  echo "ALIGN_K90_SELINUX = $ALIGN_K90_SELINUX"
+  echo "MASK_DEVICE       = $MASK_DEVICE"
+  echo ""
+  echo "NOTE: sepolicy_check.txt 里的跨厂 secilc 合编结果仅供诊断参考。"
+  echo "      最终部署到镜像的是 K90 原厂策略组合（plat/vendor/odm/system_ext/product 同源），"
+  echo "      这样 precompiled_sepolicy 的 sha256 侧文件才能全部命中，init 不会 fallback 到运行时编译。"
+  echo ""
+} > "$ALIGN_LOG"
+
+if [[ "$ALIGN_K90_VINTF" == "true" ]]; then
+  if sudo test -d "$WORK_ROOT/k90_assets/vintf"; then
+    echo ">>> [Align][VINTF] Replacing foreign system/etc/vintf with K90 stock..."
+    sudo rm -rf "$STAGE_SYS/system/etc/vintf"
+    sudo cp -a "$WORK_ROOT/k90_assets/vintf" "$STAGE_SYS/system/etc/vintf"
+    # 注：system_ext / product 属于独立分区，其 etc/vintf 的清理分别在 Phase D2 / Phase D 处理
+    echo "[Align][VINTF] Deployed K90 stock vintf:" | tee -a "$ALIGN_LOG"
+    sudo find "$STAGE_SYS/system/etc/vintf" -maxdepth 2 -type f | sed "s|$STAGE_SYS/||" | sort | tee -a "$ALIGN_LOG"
+  else
+    echo "[FATAL] ALIGN_K90_VINTF=true but $WORK_ROOT/k90_assets/vintf missing." | tee -a "$ALIGN_LOG"
+    echo "        Run with build_scope=full once, or set ALIGN_K90_BASE=selinux|none." | tee -a "$ALIGN_LOG"
+    exit 1
+  fi
+fi
+
+if [[ "$ALIGN_K90_SELINUX" == "true" ]]; then
+  if sudo test -d "$WORK_ROOT/k90_assets/selinux"; then
+    echo ">>> [Align][SELinux] Replacing foreign system/etc/selinux with K90 stock..."
+    sudo rm -rf "$STAGE_SYS/system/etc/selinux"
+    sudo cp -a "$WORK_ROOT/k90_assets/selinux" "$STAGE_SYS/system/etc/selinux"
+    # 注：system_ext / product 的 etc/selinux 属于独立分区，清理见 Phase D2 / Phase D
+    echo "[Align][SELinux] Deployed K90 stock selinux:" | tee -a "$ALIGN_LOG"
+    sudo find "$STAGE_SYS/system/etc/selinux" -maxdepth 2 -type f | sed "s|$STAGE_SYS/||" | sort | tee -a "$ALIGN_LOG"
+    if sudo test -f "$STAGE_SYS/system/etc/selinux/plat_sepolicy_vers.txt"; then
+      echo "[Align][SELinux] plat_sepolicy_vers = $(sudo cat "$STAGE_SYS/system/etc/selinux/plat_sepolicy_vers.txt")" | tee -a "$ALIGN_LOG"
+    fi
+    if sudo test -f "$STAGE_SYS/system/etc/selinux/mapping/202404.cil"; then
+      echo "[Align][SELinux] mapping/202404.cil present (matches K90 vendor)" | tee -a "$ALIGN_LOG"
+    fi
+  else
+    echo "[FATAL] ALIGN_K90_SELINUX=true but $WORK_ROOT/k90_assets/selinux missing." | tee -a "$ALIGN_LOG"
+    echo "        Run with build_scope=full once, or set ALIGN_K90_BASE=vintf|none." | tee -a "$ALIGN_LOG"
+    exit 1
+  fi
+fi
+
 # Save final patched props snapshot to report
 sudo cp "$STAGE_SYS/system/build.prop" "$REPORT_DIR/patched_system_build.prop"
 sudo cp "$STAGE_SYS/oem/oem.prop" "$REPORT_DIR/patched_oem.prop"
@@ -578,6 +692,123 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
 
   apply_remove_list "product" "$STAGE_PROD" "$REMOVED_LOG"
 
+  # --- D1a. product 侧外来 VINTF/SEPolicy 换成 K90 原厂 ---
+  # init 会同时读取 /system、/system_ext、/product、/vendor 的 etc/{vintf,selinux}。
+  # 这里选择"替换"而不是"删除"：K90 的 precompiled_sepolicy 配套了一组
+  # *_sepolicy.cil.sha256 侧文件，文件集合必须与底包完全一致才会被直接采用；
+  # 一旦缺文件，libselinux 会 fallback 到运行时 secilc，失败即 init Freeze()。
+  if [[ "$ALIGN_K90_VINTF" == "true" ]]; then
+    if sudo test -d "$WORK_ROOT/k90_assets/product_vintf"; then
+      sudo rm -rf "$STAGE_PROD/etc/vintf"
+      sudo cp -a "$WORK_ROOT/k90_assets/product_vintf" "$STAGE_PROD/etc/vintf"
+      echo "[Align][VINTF] product/etc/vintf <- K90 stock" | tee -a "$ALIGN_LOG"
+    else
+      while IFS= read -r f; do
+        sudo rm -f "$f"
+        echo "[Align][VINTF] Removed foreign device matrix: product/${f#$STAGE_PROD/}" | tee -a "$ALIGN_LOG"
+      done < <(sudo find "$STAGE_PROD/etc/vintf" -maxdepth 1 -type f -name '*device*.xml' 2>/dev/null || true)
+    fi
+  fi
+  if [[ "$ALIGN_K90_SELINUX" == "true" ]]; then
+    if sudo test -d "$WORK_ROOT/k90_assets/product_selinux"; then
+      sudo rm -rf "$STAGE_PROD/etc/selinux"
+      sudo cp -a "$WORK_ROOT/k90_assets/product_selinux" "$STAGE_PROD/etc/selinux"
+      echo "[Align][SELinux] product/etc/selinux <- K90 stock" | tee -a "$ALIGN_LOG"
+    elif sudo test -d "$STAGE_PROD/etc/selinux"; then
+      sudo rm -rf "$STAGE_PROD/etc/selinux"
+      echo "[Align][SELinux] Removed foreign CIL tree: product/etc/selinux" | tee -a "$ALIGN_LOG"
+    fi
+  fi
+
+  # --- D1b. Device identity masking: 让 ro.product.product.* 报告 K90 (annibale) ---
+  # init 的 property_source_order 默认以 product 分区为第一来源，vivo 的 product
+  # build.prop 会把 ro.product.device 变成 PD2520，导致 K90 vendor 侧按设备名
+  # 查找的显示/触控/热配置全部落空。
+  if [[ "$MASK_DEVICE" != "none" ]] && sudo test -f "$STAGE_PROD/build.prop"; then
+    echo ">>> [Align][Device] Masking product/build.prop as $MASK_DEVICE..."
+    sudo python3 - "$WORK_ROOT/k90_assets/k90_product_build.prop" \
+      "$STAGE_PROD/build.prop" "$MASK_DEVICE" "$DEVICE_MARKETNAME" <<'PYEOF' | tee -a "$ALIGN_LOG"
+import os, re, sys
+
+ref_p, dst_p, device, marketname = sys.argv[1:5]
+KEYS = [
+    "ro.product.product.device",
+    "ro.product.product.name",
+    "ro.product.product.model",
+    "ro.product.product.brand",
+    "ro.product.product.manufacturer",
+]
+FALLBACK = {
+    "ro.product.product.device": device,
+    "ro.product.product.name": device if device != "annibale" else "annibale",
+    "ro.product.product.model": marketname or device,
+    "ro.product.product.brand": "Redmi" if device == "annibale" else device,
+    "ro.product.product.manufacturer": "Xiaomi" if device == "annibale" else device,
+}
+
+ref = {}
+if ref_p and os.path.isfile(ref_p):
+    with open(ref_p, "r", encoding="utf-8", errors="replace") as f:
+        for raw in f:
+            s = raw.strip()
+            if s and not s.startswith("#") and "=" in s:
+                k, v = s.split("=", 1)
+                ref[k.strip()] = v.strip()
+
+want = {}
+for k in KEYS:
+    v = ref.get(k) or FALLBACK.get(k)
+    if v:
+        want[k] = v
+
+if not want:
+    print("[Align][Device] nothing to mask")
+    sys.exit(0)
+
+st = os.lstat(dst_p)
+xa = {}
+try:
+    for k in os.listxattr(dst_p, follow_symlinks=False):
+        xa[k] = os.getxattr(dst_p, k, follow_symlinks=False)
+except OSError:
+    pass
+
+with open(dst_p, "r", encoding="utf-8", errors="replace") as f:
+    lines = f.read().splitlines()
+
+seen = set()
+out = []
+for raw in lines:
+    s = raw.strip()
+    if s and not s.startswith("#") and "=" in s:
+        k = s.split("=", 1)[0].strip()
+        if k in want:
+            if k not in seen:
+                out.append(f"{k}={want[k]}")
+                seen.add(k)
+            continue
+    out.append(raw)
+for k, v in want.items():
+    if k not in seen:
+        out.append(f"{k}={v}")
+
+with open(dst_p, "w", encoding="utf-8") as f:
+    f.write("\n".join(out) + "\n")
+os.chown(dst_p, 0, 0)
+os.chmod(dst_p, st.st_mode & 0o7777)
+for k, v in xa.items():
+    try:
+        os.setxattr(dst_p, k, v, follow_symlinks=False)
+    except OSError:
+        pass
+for k, v in want.items():
+    print(f"[Align][Device] {k}={v}")
+PYEOF
+    sudo cp "$STAGE_PROD/build.prop" "$REPORT_DIR/patched_product_build.prop"
+  else
+    echo "[WARN] MASK_DEVICE=$MASK_DEVICE but product/build.prop not found; skipped"
+  fi
+
   # Ensure /product/vm-system mountpoint exists for K90 vendor/etc/fstab.qcom (vm-bootsys, no 'nofail'!)
   if sudo test -L "$STAGE_PROD/vm-system"; then
     sudo rm -f "$STAGE_PROD/vm-system"
@@ -617,8 +848,64 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
     --min-selinux-ratio 0.999 | tee "$REPORT_DIR/verify_product.txt"
 
   echo ""
-  echo ">>> [Phase D2] Verifying untouched system_ext.img passthrough..."
-  mv "$WORK_ROOT/neo11_parts/system_ext.img" "$OUT_DIR/system_ext.img"
+  echo ">>> [Phase D2] system_ext.img: 对齐外来 VINTF/SEPolicy..."
+  MNT_EXT="$WORK_ROOT/mnt/neo11_system_ext"
+  mount_erofs_ro "$WORK_ROOT/neo11_parts/system_ext.img" "$MNT_EXT"
+  EXT_ACTION=""
+  if [[ "$ALIGN_K90_VINTF" == "true" ]]; then
+    if sudo test -d "$WORK_ROOT/k90_assets/system_ext_vintf"; then
+      EXT_ACTION="vintf<-k90"
+    elif sudo find "$MNT_EXT/etc/vintf" -maxdepth 1 -type f -name '*device*.xml' 2>/dev/null | grep -q .; then
+      EXT_ACTION="vintf:drop-device"
+    fi
+  fi
+  if [[ "$ALIGN_K90_SELINUX" == "true" ]]; then
+    if sudo test -d "$WORK_ROOT/k90_assets/system_ext_selinux"; then
+      EXT_ACTION="${EXT_ACTION:+$EXT_ACTION,}selinux<-k90"
+    elif sudo test -d "$MNT_EXT/etc/selinux"; then
+      EXT_ACTION="${EXT_ACTION:+$EXT_ACTION,}selinux:drop"
+    fi
+  fi
+  umount_erofs "$MNT_EXT"
+
+  if [[ -z "$EXT_ACTION" ]]; then
+    echo "[Align] system_ext 无需对齐，保持原样 passthrough（免一次 8 分钟的 EROFS 重打包）"
+    mv "$WORK_ROOT/neo11_parts/system_ext.img" "$OUT_DIR/system_ext.img"
+  else
+    echo "[Align] system_ext 需要对齐（$EXT_ACTION），改为重建（其余内容保持不变）"
+    STAGE_EXT="$WORK_ROOT/stage/system_ext"
+    mount_erofs_ro "$WORK_ROOT/neo11_parts/system_ext.img" "$MNT_EXT"
+    sudo rm -rf "$STAGE_EXT"
+    sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$MNT_EXT" "$STAGE_EXT"
+    umount_erofs "$MNT_EXT"
+    rm -f "$WORK_ROOT/neo11_parts/system_ext.img"
+    if [[ "$ALIGN_K90_VINTF" == "true" ]]; then
+      if sudo test -d "$WORK_ROOT/k90_assets/system_ext_vintf"; then
+        sudo rm -rf "$STAGE_EXT/etc/vintf"
+        sudo cp -a "$WORK_ROOT/k90_assets/system_ext_vintf" "$STAGE_EXT/etc/vintf"
+        echo "[Align][VINTF] system_ext/etc/vintf <- K90 stock" | tee -a "$ALIGN_LOG"
+      else
+        while IFS= read -r f; do
+          sudo rm -f "$f"
+          echo "[Align][VINTF] Removed foreign device matrix: system_ext/${f#$STAGE_EXT/}" | tee -a "$ALIGN_LOG"
+        done < <(sudo find "$STAGE_EXT/etc/vintf" -maxdepth 1 -type f -name '*device*.xml' 2>/dev/null || true)
+      fi
+    fi
+    if [[ "$ALIGN_K90_SELINUX" == "true" ]]; then
+      if sudo test -d "$WORK_ROOT/k90_assets/system_ext_selinux"; then
+        sudo rm -rf "$STAGE_EXT/etc/selinux"
+        sudo cp -a "$WORK_ROOT/k90_assets/system_ext_selinux" "$STAGE_EXT/etc/selinux"
+        echo "[Align][SELinux] system_ext/etc/selinux <- K90 stock" | tee -a "$ALIGN_LOG"
+      elif sudo test -d "$STAGE_EXT/etc/selinux"; then
+        sudo rm -rf "$STAGE_EXT/etc/selinux"
+        echo "[Align][SELinux] Removed foreign CIL tree: system_ext/etc/selinux" | tee -a "$ALIGN_LOG"
+      fi
+    fi
+    sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" fixup "$STAGE_EXT" --default-selinux "u:object_r:system_file:s0"
+    sudo rm -f "$OUT_DIR/system_ext.img"
+    sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/system_ext.img" "$STAGE_EXT"
+    sudo rm -rf "$STAGE_EXT"
+  fi
   sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" verify "$OUT_DIR/system_ext.img" \
     --expect-file "etc/build.prop" \
     --min-selinux-ratio 0.999 | tee "$REPORT_DIR/verify_system_ext.txt"
@@ -711,6 +998,8 @@ Build Date UTC: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 Base ROM      : REDMI K90 HyperOS 4 (OS4.0.6.0.XPKCNXM / Android 17 / Vendor API 202404)
 Port ROM      : iQOO Neo 11 OriginOS 7 (PD2520_A_17.1.15.2.W10.V000L1 / Android 17)
 OEM Variant   : $VIVO_OEM_VARIANT
+K90 Align     : $ALIGN_K90_BASE (vintf=$ALIGN_K90_VINTF selinux=$ALIGN_K90_SELINUX)
+Device Mask   : $MASK_DEVICE
 EOF
 cat "$REPORT_DIR/capacity_summary.txt" >> "$OUT_DIR/BUILD_INFO.txt"
 
@@ -742,7 +1031,7 @@ echo "=================================================================="
 command -v fastboot >/dev/null || { echo "[ERROR] fastboot not found! Run: brew install android-platform-tools"; exit 1; }
 
 echo ""
-echo "[1/6] Verifying local image SHA256 checksums..."
+echo "[1/7] Verifying local image SHA256 checksums..."
 if command -v shasum >/dev/null; then
   shasum -a 256 -c SHA256SUMS.txt
 else
@@ -751,7 +1040,7 @@ fi
 echo "[OK] All image checksums verified."
 
 echo ""
-echo "[2/6] Detecting connected REDMI K90 in Fastboot / Fastbootd..."
+echo "[2/7] Detecting connected REDMI K90 in Fastboot / Fastbootd..."
 fastboot devices
 PRODUCT="$(fastboot getvar product 2>&1 | awk -F': ' '/^product:/{print $2}' | tr -d '\r' | head -n 1)"
 if [[ "$PRODUCT" != "annibale" ]]; then
@@ -767,21 +1056,18 @@ fi
 echo "[OK] Verified device=annibale, active slot=${SLOT}"
 
 IS_USERSPACE="$(fastboot getvar is-userspace 2>&1 | awk -F': ' '/^is-userspace:/{print $2}' | tr -d '\r' | head -n 1 || true)"
-if [[ -f vbmeta.img && -f vbmeta_system.img ]]; then
-  if [[ "$IS_USERSPACE" == "yes" ]]; then
-    echo ""
-    echo "[3/6] Currently in fastbootd; rebooting to bootloader first to disable AVB on vbmeta safely..."
-    fastboot reboot bootloader
-    sleep 4
-    IS_USERSPACE="no"
-  fi
-  echo ""
-  echo "[3/6] Disabling AVB verity & verification in bootloader mode on vbmeta_${SLOT} & vbmeta_system_${SLOT}..."
-  fastboot --disable-verity --disable-verification flash "vbmeta_${SLOT}" vbmeta.img
-  fastboot --disable-verity --disable-verification flash "vbmeta_system_${SLOT}" vbmeta_system.img
-fi
-
+echo ""
+echo "[3/7] Ensuring device is in fastbootd BEFORE disabling AVB..."
+# IMPORTANT (verified on real REDMI K90 SM8750 hardware):
+# K90 ABL refuses to boot recovery/fastbootd if vbmeta has --disable-verification written first!
+# Therefore we MUST enter fastbootd with stock unmodified vbmeta first, flash dynamic partitions,
+# and ONLY disable AVB in bootloader mode right before booting Android.
 if [[ "$IS_USERSPACE" != "yes" ]]; then
+  if [[ -f vbmeta.img ]]; then
+    echo "  -> Restoring unmodified stock vbmeta_${SLOT} & marking slot ${SLOT} active so fastbootd boots cleanly..."
+    fastboot flash "vbmeta_${SLOT}" vbmeta.img
+  fi
+  fastboot set_active "${SLOT}"
   echo "  -> Rebooting from bootloader into fastbootd (userspace fastboot)..."
   fastboot reboot fastboot
   echo "  Waiting for fastbootd..."
@@ -795,12 +1081,19 @@ fi
 echo "[OK] Confirmed device is in fastbootd (is-userspace=yes)."
 
 echo ""
-echo "[4/6] Cancelling any pending Virtual A/B snapshot updates (best-effort)..."
+echo "[4/7] Cancelling any pending Virtual A/B snapshot updates & checking for unmerged -cow partitions..."
 fastboot snapshot-update cancel 2>/dev/null || true
+LEFTOVER_COWS="$(fastboot getvar all 2>&1 | grep -E "partition-size:(vendor|odm|vendor_dlkm|system_dlkm)_${SLOT}-cow:" || true)"
+if [[ -n "$LEFTOVER_COWS" ]]; then
+  echo "[WARN] Detected unmerged Virtual A/B -cow partitions on slot _${SLOT}:"
+  echo "$LEFTOVER_COWS"
+  echo "[WARN] Wiping /metadata while vendor/odm -cow snapshots remain unmerged will corrupt vendor/odm!"
+  echo "[WARN] Recommended: merge OTA first (boot stock OS once) or re-flash clean stock vendor/odm/dlkm images."
+fi
 
 if [[ -f product.img && -f system_ext.img && -f mi_ext.img && -f mi_product.img ]]; then
   echo ""
-  echo "[5/6] Resizing dynamic partitions on slot _${SLOT} & flashing FULL OriginOS 7 bundle..."
+  echo "[5/7] Resizing dynamic partitions on slot _${SLOT} & flashing FULL OriginOS 7 bundle..."
   echo "      (vendor_${SLOT}, odm_${SLOT}, vendor_dlkm_${SLOT}, system_dlkm_${SLOT} are NOT touched!)"
   # Shrink old large HyperOS partitions to 0 first (preserving qti_dynamic_partitions group!)
   for p in product system_ext mi_ext mi_product; do
@@ -822,21 +1115,38 @@ if [[ -f product.img && -f system_ext.img && -f mi_ext.img && -f mi_product.img 
   echo "  -> Flashing system_ext_${SLOT}..."
   fastboot flash "system_ext_${SLOT}" system_ext.img
 
-  echo "  -> Flashing system_${SLOT} (largest partition, ~7 GB)..."
+  echo "  -> Flashing system_${SLOT} (largest partition, ~8 GB)..."
   fastboot flash "system_${SLOT}" system.img
 else
   echo ""
-  echo "[5/6] Flashing system-only update to system_${SLOT}..."
+  echo "[5/7] Flashing system-only update to system_${SLOT}..."
   fastboot flash "system_${SLOT}" system.img
 fi
 
+if [[ -f vbmeta.img && -f vbmeta_system.img ]]; then
+  echo ""
+  echo "[6/7] Rebooting to bootloader to disable AVB dm-verity (--disable-verity) on vbmeta_${SLOT}..."
+  # IMPORTANT (verified on real REDMI K90 SM8750 hardware):
+  # Using --disable-verification (flags=3) causes K90 ABL to skip loading init_boot/vendor_boot/dtbo/pvmfw
+  # and bounce straight back to red FASTBOOT. Using --disable-verity (flags=1) keeps boot/init_boot/vendor_boot
+  # loading intact while disabling dm-verity hashtree checks on unsigned EROFS system/product/system_ext/mi_ext.
+  fastboot reboot bootloader
+  sleep 4
+  fastboot --disable-verity flash "vbmeta_${SLOT}" vbmeta.img
+  fastboot flash "vbmeta_system_${SLOT}" vbmeta_system.img
+  fastboot set_active "${SLOT}"
+else
+  echo ""
+  echo "[6/7] System-only mode: skipping vbmeta AVB re-flash."
+fi
+
 echo ""
-echo "[6/6] Wipe userdata/metadata? (REQUIRED on first switch from HyperOS -> OriginOS!)"
+echo "[7/7] Wipe userdata/metadata? (REQUIRED on first switch from HyperOS -> OriginOS!)"
 read -r -p "Run 'fastboot -w' (ERASES ALL USER DATA)? Type YES to wipe, or Enter to skip: " WIPE_ANS
 if [[ "$WIPE_ANS" == "YES" ]]; then
   echo "  -> Wiping userdata & metadata..."
   if ! fastboot -w; then
-    echo "  [WARN] 'fastboot -w' failed in fastbootd; falling back to erasing metadata & userdata (fstab marks both formattable)..."
+    echo "  [WARN] 'fastboot -w' failed; falling back to erasing metadata & userdata (fstab marks both formattable)..."
     fastboot erase metadata
     fastboot erase userdata
   fi

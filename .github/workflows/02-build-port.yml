@@ -28,6 +28,16 @@ on:
         options:
           - lz4hc,9
           - lz4hc,12
+      align_k90_base:
+        description: "Force framework VINTF/SEPolicy back to K90 stock. all=recommended; none=only for A/B diff experiments"
+        type: choice
+        required: true
+        default: "all"
+        options:
+          - all
+          - vintf
+          - selinux
+          - none
       upload_to_ms:
         description: "Automatically upload packaged ROM bundle to ModelScope Private Dataset"
         type: boolean
@@ -118,6 +128,8 @@ jobs:
           BUILD_SCOPE: ${{ inputs.build_scope }}
           DEBUG_ADB: ${{ inputs.debug_adb }}
           EROFS_COMPRESS: ${{ inputs.erofs_compress }}
+          ALIGN_K90_BASE: ${{ inputs.align_k90_base }}
+          MASK_DEVICE: "annibale"
           REPORT_DIR: ${{ env.WORK_ROOT }}/build_report
           OUT_DIR: ${{ env.WORK_ROOT }}/port_bundle
         run: |
