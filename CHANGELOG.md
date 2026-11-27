@@ -229,6 +229,14 @@
   - 新增 `_ARTIFACT_INFO.txt`（tag / scope / align / debug_adb / commit / run / 生成时间），并写入 `BUILD_INFO.txt` 的 `K90 Align`、`Device Mask` 字段。
   - `scripts/03_patch_port.sh` 的 `mkdir -p` 改为失败即 `[FATAL]` 并打印三个路径，banner 增加 `Report` / `OutDir` 两行，避免同类路径错误再次静默早退。
 
+#### Step 22：oem 变体目录改为自动发现（修复 `OEM variant directory not found`）
+- **实测报错**：`[FATAL] OEM variant directory not found in oem.img: PD2520_CN-ZH_FULL_SC_NULL`（`config/device_annibale.env` 里硬编码的变体名与实包不一致）。
+- **修复（Phase C3 重写）**：
+  - 先把 `oem.img` 的真实布局 dump 到 `build_report/neo11_oem_layout.txt`（顶层清单 + 深度≤2 的目录 + 所有 `oem.prop` 候选）。
+  - 变体解析改为四级回退：**精确匹配 → `PD2520*CN*` → `PD2520*` → 任意自带 `oem.prop` 的一级子目录**；命中不一致时只打 `[WARN]` 并记录实际命中名，不再 FATAL。
+  - 完全找不到变体目录时退化为"仅根级 `oem.prop`"并继续构建（不再中断）；`/oem/oem.prop` 由 base + variant 合并生成，缺任一侧都能产出。
+  - `BUILD_INFO.txt` 的 `OEM Variant` 同时记录实测值与配置值，便于回溯。
+
 ---
 
 ## 待补操作清单（Pending / Next Steps）

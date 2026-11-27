@@ -404,8 +404,51 @@ sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$MNT_VGC" "$STAGE_SYS/vg
 umount_erofs "$MNT_VGC"
 rm -rf "$WORK_ROOT/neo11_vgc_raw"
 
-# --- C3. Populate /oem inside SAR system root (retail China variant flattened) ---
-echo "[Patch] Injecting Neo 11 /oem (variant=$VIVO_OEM_VARIANT) into SAR system root..."
+# --- C3. Populate /oem inside SAR system root (variant auto-discovery) ---
+# oem.img 的变体目录名随 region/批次变化，PD2520_CN-ZH_FULL_SC_NULL 只是其中一种。
+# 先把真实布局落到报告，再按 "精确 -> PD2520*CN* -> PD2520* -> 任意含 oem.prop 的子目录"
+# 逐级回退，避免硬编码导致构建中途 FATAL。
+OEM_LAYOUT="$REPORT_DIR/neo11_oem_layout.txt"
+{
+  echo "=== oem.img top-level ==="
+  sudo ls -la "$MNT_OEM" 2>/dev/null || true
+  echo ""
+  echo "=== directories (depth<=2) ==="
+  sudo find "$MNT_OEM" -mindepth 1 -maxdepth 2 -type d 2>/dev/null | sed "s|$MNT_OEM/||" | sort || true
+  echo ""
+  echo "=== oem.prop candidates (depth<=3) ==="
+  sudo find "$MNT_OEM" -maxdepth 3 -name 'oem.prop' 2>/dev/null | sed "s|$MNT_OEM/||" | sort || true
+  echo ""
+  echo "=== configured VIVO_OEM_VARIANT = $VIVO_OEM_VARIANT ==="
+} > "$OEM_LAYOUT"
+
+OEM_VARIANT_PATH=""
+if sudo test -d "$MNT_OEM/$VIVO_OEM_VARIANT"; then
+  OEM_VARIANT_PATH="$MNT_OEM/$VIVO_OEM_VARIANT"
+else
+  OEM_CAND_CN="$(sudo find "$MNT_OEM" -mindepth 1 -maxdepth 2 -type d -name 'PD2520*CN*' 2>/dev/null | sort | head -n 1 || true)"
+  OEM_CAND_ANY="$(sudo find "$MNT_OEM" -mindepth 1 -maxdepth 2 -type d -name 'PD2520*' 2>/dev/null | sort | head -n 1 || true)"
+  OEM_CAND_PROP="$(sudo find "$MNT_OEM" -mindepth 2 -maxdepth 2 -type d 2>/dev/null | sort | while IFS= read -r d; do sudo test -f "$d/oem.prop" && { echo "$d"; break; }; done || true)"
+  if [[ -n "$OEM_CAND_CN" ]]; then
+    OEM_VARIANT_PATH="$OEM_CAND_CN"
+  elif [[ -n "$OEM_CAND_ANY" ]]; then
+    OEM_VARIANT_PATH="$OEM_CAND_ANY"
+  elif [[ -n "$OEM_CAND_PROP" ]]; then
+    OEM_VARIANT_PATH="$OEM_CAND_PROP"
+  fi
+fi
+
+if [[ -n "$OEM_VARIANT_PATH" ]]; then
+  OEM_VARIANT_NAME="$(basename "$OEM_VARIANT_PATH")"
+  echo "[Patch] Injecting Neo 11 /oem (resolved variant=$OEM_VARIANT_NAME, configured=$VIVO_OEM_VARIANT)..."
+  if [[ "$OEM_VARIANT_NAME" != "$VIVO_OEM_VARIANT" ]]; then
+    echo "        [WARN] 配置的变体与包内实际不一致，已自动回退到 $OEM_VARIANT_NAME（详见 $OEM_LAYOUT）"
+  fi
+else
+  OEM_VARIANT_NAME="$VIVO_OEM_VARIANT"
+  echo "[WARN] oem.img 内未找到任何变体目录，退化为仅使用根级 oem.prop（详见 $OEM_LAYOUT）"
+fi
+
 if sudo test -L "$STAGE_SYS/oem"; then
   sudo rm -f "$STAGE_SYS/oem"
 fi
@@ -416,17 +459,23 @@ sudo python3 -c 'import os,sys; os.setxattr(sys.argv[1],"security.selinux",b"u:o
 if sudo test -d "$MNT_OEM/etc"; then
   sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$MNT_OEM/etc" "$STAGE_SYS/oem/etc" --override-selinux "u:object_r:system_file:s0"
 fi
-if sudo test -d "$MNT_OEM/$VIVO_OEM_VARIANT"; then
-  sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$MNT_OEM/$VIVO_OEM_VARIANT" "$STAGE_SYS/oem/$VIVO_OEM_VARIANT" --override-selinux "u:object_r:system_file:s0"
-else
-  echo "[FATAL] OEM variant directory not found in oem.img: $VIVO_OEM_VARIANT"
-  exit 1
+if [[ -n "$OEM_VARIANT_PATH" ]]; then
+  sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$OEM_VARIANT_PATH" "$STAGE_SYS/oem/$OEM_VARIANT_NAME" --override-selinux "u:object_r:system_file:s0"
 fi
 
 # Flatten base oem.prop + variant oem.prop into /oem/oem.prop so init's `import /oem/oem.prop`
 # loads all retail China OriginOS 7 identity/region properties natively!
+OEM_BASE_PROP=""
+if sudo test -f "$MNT_OEM/oem.prop"; then
+  OEM_BASE_PROP="$MNT_OEM/oem.prop"
+fi
+OEM_VAR_PROP=""
+if [[ -n "$OEM_VARIANT_PATH" ]] && sudo test -f "$OEM_VARIANT_PATH/oem.prop"; then
+  OEM_VAR_PROP="$OEM_VARIANT_PATH/oem.prop"
+fi
+echo "[Patch] Flattening oem.prop (base='${OEM_BASE_PROP:-<none>}', variant='${OEM_VAR_PROP:-<none>}')..."
 sudo rm -f "$STAGE_SYS/oem/oem.prop"
-sudo python3 - "$MNT_OEM/oem.prop" "$MNT_OEM/$VIVO_OEM_VARIANT/oem.prop" "$STAGE_SYS/oem/oem.prop" "$VIVO_OEM_VARIANT" <<'PYEOF'
+sudo python3 - "$OEM_BASE_PROP" "$OEM_VAR_PROP" "$STAGE_SYS/oem/oem.prop" "$OEM_VARIANT_NAME" <<'PYEOF'
 import os, sys
 
 base_p, var_p, out_p, var_name = sys.argv[1:5]
@@ -1010,7 +1059,7 @@ EROFS Compress: $EROFS_COMPRESS
 Build Date UTC: $(date -u '+%Y-%m-%d %H:%M:%S UTC')
 Base ROM      : REDMI K90 HyperOS 4 (OS4.0.6.0.XPKCNXM / Android 17 / Vendor API 202404)
 Port ROM      : iQOO Neo 11 OriginOS 7 (PD2520_A_17.1.15.2.W10.V000L1 / Android 17)
-OEM Variant   : $VIVO_OEM_VARIANT
+OEM Variant   : ${OEM_VARIANT_NAME:-$VIVO_OEM_VARIANT} (configured: $VIVO_OEM_VARIANT)
 K90 Align     : $ALIGN_K90_BASE (vintf=$ALIGN_K90_VINTF selinux=$ALIGN_K90_SELINUX)
 Device Mask   : $MASK_DEVICE
 EOF
