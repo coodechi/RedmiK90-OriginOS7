@@ -167,6 +167,15 @@
   9. **防宿主机 `secilc` 版本代差误杀 + 挂载/通配符细节加固**：`scripts/check_sepolicy.py` 在校检 `Neo 11 + K90` 前先用纯原厂 K90 五分区 CIL 做 0.3 秒基线自校（若 Ubuntu 24.04 自带 `secilc 3.5` 连原厂 Android 17 CIL 语法都不支持，则输出警告并跳过硬拦截，避免误杀）；`mount_erofs_ro` 增加 `-o ro,loop` 自动文件系统兜底；修复 `sudo du -sm .../*` 非 root shell 展开通配符问题，并在 `mkfs.erofs` 前清理同名旧镜像。
   10. **修复悬空软链写入导致的 `ENOENT` 并全仓排查同类路径**：SAR `system.img` 根目录 `/adb_keys` 原生可能为悬空软链，`sudo tee` 跟随软链写入触发 `No such file or directory`；现写入 `/adb_keys` 与 `/system/etc/security/adb_keys` 前先 `mkdir -p` 并 `rm -f` 解链，同时全仓对 `/oem`、`/oem/oem.prop`、`prop.default`、`/product/vm-system`、`displayconfig` 及 `erofs_repack.py` 目录创建统一补齐软链前置解链防护。
 
+#### Step 15：分析 `v0.1-bringup` 首版构包报告——启用真 `secilc` 跨厂门禁并精细保留 20 款 OriginOS 原生核心应用
+- **首版 `v0.1-bringup` 实测结果**：
+  - 容量门禁通过：总占用 `11.291 GiB / 12.490 GiB`，富余 **`1,227.66 MiB`**。
+  - EROFS 封装与 SELinux 验证全部满分：`system.img`（`20,434/20,434 = 100.00%`、`capabilities=2`）、`product.img`（`311/311 = 100.00%`、含 K90 屏幕校准 XML）、`system_ext.img`（`1,954/1,954 = 100.00%`）、`mi_ext.img`（`1/1 = 100.00%`）。
+  - `init.rc` 审计确认所有 `critical`/`reboot_on_failure` 均为标准 AOSP 服务，无 vivo 专属硬件强重启风险。
+- **针对报告两项关键发现的优化**：
+  1. **打通真实 `secilc` 跨厂策略合编（`scripts/check_sepolicy.py`）**：`v0.1` 报告显示 Ubuntu 24.04 自带 `secilc 3.5` 仅卡在 Android 17 新增的 `(policycap functionfs_seclabel)` 而提前跳出基线校验；现改为在临时镜像目录按 1:1 行号注释掉宿主机不认识的 `policycap`（不修改 ROM 内真实 `plat_sepolicy.cil`），使纯原厂 K90 基线真正通过后再执行 `Neo 11 + K90` 真跨厂合编与自动 shim（最大轮次提升至 `100`，并补齐 `class`/`roleattribute`/`typealias`/`typebounds`/`typepermissive` 识别）。
+  2. **精细保留 OriginOS 原生核心应用（`config/remove_list.txt`）**：根据实测 `neo11_custom_apps.txt` 清单，将全清空 `system/custom/app/*` 改为精确名单移除 42 项非核心体积大户（含 `JoviCopilot`/`SmartOffice`/`ihealth`/`vivogame`/`Baidu` 等），保留 20 款 OriginOS 原生核心应用（`VivoGallery`/`VivoPhoto`/`VideoPlayer`/`BBKMusic`/`IqooSecure`/`BBKNotes`/`BBKWeather`/`BBKTheme`/`VivoCalendar`/`BBKSoundRecorder`/`BBKTimer`/`BBKCalculator`/`Compass`/`SmartRemote` 及配套组件），兼顾完整体验与 ~400+ MiB 富余空间。
+
 ---
 
 ## 待补操作清单（Pending / Next Steps）

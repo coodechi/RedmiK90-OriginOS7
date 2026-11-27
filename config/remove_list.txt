@@ -3,26 +3,76 @@
 #
 # Paths are relative to each partition's mounted root:
 #   - For SAR system.img: Android /system/... is under system/...
-#   - Suffix "/*" clears directory contents while keeping the empty directory
-#     (safer when system services scan a directory).
+#   - Suffix "/*" clears directory contents while keeping the empty directory.
+#
+# Kept core OriginOS 7 native apps in /system/custom/app (~1,022 MiB raw):
+#   VivoGallery, VivoPhoto, VideoPlayer, BBKMusic, IqooSecure, BBKNotes,
+#   BBKWeather, BBKWidgetWeather, BBKTheme, ThemeEffect, VivoCalendar,
+#   WidgetCalendar, BBKSoundRecorder, BBKTimer, TimerWidget, BBKCalculator,
+#   Compass, SmartRemote, GalleryWidget, LockScreen
 # ==============================================================================
 
 [system]
-# --- 1. Preinstalled 3rd-party bloatware (~2,262 MiB recovered!) ---
-system/custom/app/*
-
-# --- 2. Neo 11 hardware-specific / conflicting vivo packages ---
+# --- 1. Neo 11 hardware-specific / conflicting vivo packages ---
 # Expects missing vendor.vivo.hardware.vivoalgoservice HAL on K90
 system/app/Vivo3rdAlgoService
 # Expects missing vendor.vivo.hardware.vibrator_{ext,pro,hall} HALs on K90
 system/app/vibrator4d
 
-# --- 3. Prevent accidental vivo OTA updates on REDMI K90 ---
+# --- 2. Prevent accidental vivo OTA updates on REDMI K90 ---
 system/app/Updater
 system/app/COTA
 
+# --- 3. Removable non-core / bulky apps in /system/custom/app (~1.5 GiB) ---
+system/custom/app/JoviCopilot
+system/custom/app/SmartOffice
+system/custom/app/ihealth
+system/custom/app/vivogame
+system/custom/app/vivospace-v2
+system/custom/app/vivoWallet
+system/custom/app/VTouch
+system/custom/app/VideoEditor
+system/custom/app/VivoDeformer
+system/custom/app/iRoaming
+system/custom/app/iRoamingService
+system/custom/app/WalkieTalkie
+system/custom/app/BehaviorSkyLight
+system/custom/app/BehaviorMountain
+system/custom/app/BehaviorCity
+system/custom/app/Behavior
+system/custom/app/FamilyCare
+system/custom/app/CarNetworking
+system/custom/app/CarLauncher
+system/custom/app/VivoTips
+system/custom/app/PureSearch
+system/custom/app/RemoteAssistant
+system/custom/app/MountainRoad
+system/custom/app/AiTranslate
+system/custom/app/MoodCube
+system/custom/app/healthwidget
+system/custom/app/healthCare
+system/custom/app/Feedback
+system/custom/app/SuggestionComponent
+system/custom/app/DoubleTimezoneClock
+system/custom/app/vivoConsole
+system/custom/app/LauncherCopilot
+system/custom/app/VivoKaraoke
+system/custom/app/GameTraining
+system/custom/app/DevicePower
+system/custom/app/VivoDreamClockApp
+system/custom/app/VivoDreamWeatherApp
+system/custom/app/TimeManagerWidget
+system/custom/app/AppSuggestion
+system/custom/app/EasterEgg
+system/custom/app/CleanSpeed
+system/custom/app/CountdownWidget
+
+# --- 4. Removable preinstalled bloat in /system/custom/priv-app (~88 MiB) ---
+system/custom/priv-app/Baidu
+system/custom/priv-app/AppRecommendation
+
 [product]
-# Keep product clean and intact for v1 bring-up (only 389 MiB total)
+# Keep product clean and intact (381 MiB total)
 
 [system_ext]
-# Keep system_ext intact for v1 bring-up (only 205 MiB total)
+# Keep system_ext intact (205 MiB total)
