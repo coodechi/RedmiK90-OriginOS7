@@ -218,6 +218,17 @@
 - **开关**：`ALIGN_K90_BASE=all|vintf|selinux|none`（默认 `all`）、`MASK_DEVICE=annibale|none`（默认 `annibale`）；已接入 `.github/workflows/02-build-port.yml` 的 `align_k90_base` 下拉输入，便于 A/B 对照。
 - **预期效果**：消掉两处必然失败（SELinux Freeze、VINTF FATAL）；OriginOS 应用会大量落在外来 domain → permissive 下仅告警，属第一版可接受代价。
 
+#### Step 21：修复 Actions 报告产物恒为 `k90-originos7-build-report-v0.1-bringup` 的配置缺陷
+- **根因**：`.github/workflows/02-build-port.yml` 从头到尾引用 `${{ env.WORK_ROOT }}`（第 121/122/134/158/164 行），但**全文件从未定义 `WORK_ROOT`**。表达式求值为空串后：
+  - `REPORT_DIR` → `/build_report`、`OUT_DIR` → `/port_bundle`（根目录），`runner` 用户对 `/` 无写权限，`scripts/03_patch_port.sh` 的 `mkdir -p` 立即失败；
+  - artifact 的 `path` 也指向不存在的 `/build_report`；
+  - artifact `name` 只拼接 `inputs.build_tag`，不含 run 号，因此每次下载到的都是同名目录，无法区分版本。
+- **修复**：
+  - job 级新增 `env: WORK_ROOT: ${{ runner.temp }}/rom_work`，`REPORT_DIR`/`OUT_DIR`/Step Summary 全部随之生效。
+  - artifact 命名改为 `k90-originos7-build-report-<build_tag>-run<run_number>`，并新增 "Stage report into tag-named folder" 步骤：把 `build_report` 复制到同名目录后再上传，解压即得带 tag 的文件夹。
+  - 新增 `_ARTIFACT_INFO.txt`（tag / scope / align / debug_adb / commit / run / 生成时间），并写入 `BUILD_INFO.txt` 的 `K90 Align`、`Device Mask` 字段。
+  - `scripts/03_patch_port.sh` 的 `mkdir -p` 改为失败即 `[FATAL]` 并打印三个路径，banner 增加 `Report` / `OutDir` 两行，避免同类路径错误再次静默早退。
+
 ---
 
 ## 待补操作清单（Pending / Next Steps）

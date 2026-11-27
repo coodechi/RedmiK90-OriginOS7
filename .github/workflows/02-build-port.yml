@@ -51,6 +51,12 @@ jobs:
   build-port:
     runs-on: ubuntu-latest
     timeout-minutes: 180
+    # 关键：WORK_ROOT 必须定义。此前整个工作流只引用 ${{ env.WORK_ROOT }} 却从未定义，
+    # 展开为空串后变成 REPORT_DIR=/build_report、OUT_DIR=/port_bundle（根目录），
+    # runner 用户对 / 无写权限 -> mkdir 立即失败；artifact path 也指向不存在的
+    # /build_report，于是每次下载到的都是同名空目录，永远分不清是哪个 build_tag。
+    env:
+      WORK_ROOT: ${{ runner.temp }}/rom_work
     steps:
       - name: Checkout repository
         uses: actions/checkout@v4
@@ -162,12 +168,39 @@ jobs:
           echo "ARCHIVE_NAME=$ARCHIVE_NAME" >> "$GITHUB_ENV"
           bash scripts/05_upload_ms.sh "$OUT_DIR" "$TARGET_MS_REPO" "$ARCHIVE_NAME" "builds/${BUILD_TAG}"
 
+      - name: Stage report into tag-named folder
+        if: always()
+        run: |
+          set -uo pipefail
+          ART_NAME="k90-originos7-build-report-${{ inputs.build_tag }}-run${{ github.run_number }}"
+          SRC="$WORK_ROOT/build_report"
+          DST="$RUNNER_TEMP/$ART_NAME"
+          rm -rf "$DST"
+          mkdir -p "$DST"
+          if [[ -d "$SRC" ]] && [[ -n "$(ls -A "$SRC" 2>/dev/null)" ]]; then
+            cp -a "$SRC/." "$DST/"
+            echo "[Artifact] Copied $(find "$DST" -type f | wc -l) files from $SRC"
+          else
+            echo "::warning::build_report 目录不存在或为空（$SRC）——本次构建很可能在 mkdir 阶段就失败了，请看上面的 Build 步骤日志"
+          fi
+          {
+            echo "artifact_name = $ART_NAME"
+            echo "build_tag     = ${{ inputs.build_tag }}"
+            echo "build_scope   = ${{ inputs.build_scope }}"
+            echo "align_k90_base= ${{ inputs.align_k90_base }}"
+            echo "debug_adb     = ${{ inputs.debug_adb }}"
+            echo "commit        = ${{ github.sha }}"
+            echo "run           = ${{ github.run_number }}.${{ github.run_attempt }}"
+            echo "generated_utc = $(date -u '+%Y-%m-%d %H:%M:%S UTC')"
+          } > "$DST/_ARTIFACT_INFO.txt"
+          ls -la "$DST"
+
       - name: Upload lightweight build & verification report Artifact
         if: always()
         uses: actions/upload-artifact@v4
         with:
-          name: k90-originos7-build-report-${{ inputs.build_tag }}
-          path: ${{ env.WORK_ROOT }}/build_report
+          name: k90-originos7-build-report-${{ inputs.build_tag }}-run${{ github.run_number }}
+          path: ${{ runner.temp }}/k90-originos7-build-report-${{ inputs.build_tag }}-run${{ github.run_number }}
           retention-days: 30
 
       - name: Write GitHub Step Summary

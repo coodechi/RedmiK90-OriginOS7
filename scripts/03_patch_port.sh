@@ -47,7 +47,15 @@ esac
 # annibale | none  —— 把 product/build.prop 的 ro.product.product.* 伪装成 K90
 MASK_DEVICE="${MASK_DEVICE:-annibale}"
 
-mkdir -p "$WORK_ROOT" "$REPORT_DIR" "$OUT_DIR"
+if ! mkdir -p "$WORK_ROOT" "$REPORT_DIR" "$OUT_DIR" 2>/dev/null; then
+  echo "[FATAL] 无法创建 WORK_ROOT / REPORT_DIR / OUT_DIR："
+  echo "        WORK_ROOT=$WORK_ROOT"
+  echo "        REPORT_DIR=$REPORT_DIR"
+  echo "        OUT_DIR=$OUT_DIR"
+  echo "        常见原因：WORK_ROOT 未导出，REPORT_DIR/OUT_DIR 被展开成 /build_report、"
+  echo "        /port_bundle 这类根目录路径（runner 用户对 / 无写权限）。"
+  exit 1
+fi
 
 # Cleanup any active loop mounts on exit
 ACTIVE_MOUNTS=()
@@ -134,6 +142,8 @@ echo "  Compress: $EROFS_COMPRESS"
 echo "  AlignK90: $ALIGN_K90_BASE (vintf=$ALIGN_K90_VINTF selinux=$ALIGN_K90_SELINUX)"
 echo "  MaskDev : $MASK_DEVICE"
 echo "  WorkRoot: $WORK_ROOT"
+echo "  Report  : $REPORT_DIR"
+echo "  OutDir  : $OUT_DIR"
 echo "=================================================================="
 df -Th "$WORK_ROOT"
 
