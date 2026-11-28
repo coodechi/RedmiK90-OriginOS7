@@ -865,17 +865,13 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
     echo ">>> [Phase D][overlay] Using K90 STOCK product/system_ext/mi images verbatim..."
     cp "$WORK_ROOT/k90_assets/stock_images/product_a.img" "$OUT_DIR/product.img"
     cp "$WORK_ROOT/k90_assets/stock_images/system_ext_a.img" "$OUT_DIR/system_ext.img"
-    # Stock mi_ext/mi_product came from super: extract them here (not in Phase A list)
-    # Fallback: use empty 4K images if stock ones unavailable (kept for compatibility)
-    MI_DIR="$WORK_ROOT/stage/empty_erofs"
-    mkdir -p "$MI_DIR"
-    if [[ -f "$WORK_ROOT/k90_assets/stock_images/mi_ext_a.img" ]]; then
-      cp "$WORK_ROOT/k90_assets/stock_images/mi_ext_a.img" "$OUT_DIR/mi_ext.img"
-      cp "$WORK_ROOT/k90_assets/stock_images/mi_product_a.img" "$OUT_DIR/mi_product.img"
-    else
-      sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/mi_ext.img" "$MI_DIR"
-      sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/mi_product.img" "$MI_DIR"
+    # Stock mi_ext/mi_product were persisted in Phase A (overlay mode).
+    if [[ ! -f "$WORK_ROOT/k90_assets/stock_images/mi_ext_a.img" || ! -f "$WORK_ROOT/k90_assets/stock_images/mi_product_a.img" ]]; then
+      echo "[FATAL][overlay] stock mi images missing in k90_assets/stock_images (Phase A extraction failed?)"
+      exit 1
     fi
+    cp "$WORK_ROOT/k90_assets/stock_images/mi_ext_a.img" "$OUT_DIR/mi_ext.img"
+    cp "$WORK_ROOT/k90_assets/stock_images/mi_product_a.img" "$OUT_DIR/mi_product.img"
     echo "[overlay] product/system_ext/mi = K90 stock (not OriginOS)" | tee "$REPORT_DIR/overlay_layers_phase_d.txt"
   else
   echo ""
