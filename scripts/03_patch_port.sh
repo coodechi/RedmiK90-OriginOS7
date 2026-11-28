@@ -205,7 +205,19 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
   rm -rf "$WORK_ROOT/k90_tmp"
 
   python3 "$REPO_ROOT/scripts/lp_tools.py" dump "$WORK_ROOT/k90_super_raw.img" > "$REPORT_DIR/k90_super_layout.txt"
-  python3 "$REPO_ROOT/scripts/lp_tools.py" unpack "$WORK_ROOT/k90_super_raw.img" "$WORK_ROOT/k90_parts" "product_a,vendor_a,odm_a,system_a,system_ext_a"
+  K90_UNPACK_PARTS="product_a,vendor_a,odm_a,system_a,system_ext_a"
+  if [[ "${PORT_MODE:-full}" == "overlay" ]]; then
+    K90_UNPACK_PARTS="$K90_UNPACK_PARTS,mi_ext_a,mi_product_a,system_dlkm_a"
+  fi
+  python3 "$REPO_ROOT/scripts/lp_tools.py" unpack "$WORK_ROOT/k90_super_raw.img" "$WORK_ROOT/k90_parts" "$K90_UNPACK_PARTS"
+  # v0.5 overlay: keep stock product/mi/boot-chain images verbatim for Phase D.
+  if [[ "${PORT_MODE:-full}" == "overlay" ]]; then
+    mkdir -p "$WORK_ROOT/k90_assets/stock_images"
+    for p in product_a mi_ext_a mi_product_a system_dlkm_a; do
+      cp "$WORK_ROOT/k90_parts/${p}.img" "$WORK_ROOT/k90_assets/stock_images/${p}.img"
+      echo "[K90][overlay] Kept stock ${p}.img ($(du -sh "$WORK_ROOT/k90_assets/stock_images/${p}.img" | awk '{print $1}'))"
+    done
+  fi
   rm -f "$WORK_ROOT/k90_super_raw.img"
 
   mkdir -p "$WORK_ROOT/k90_sepolicy" "$WORK_ROOT/k90_assets"
@@ -298,6 +310,12 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
         done
       fi
       umount_erofs "$WORK_ROOT/k90_mnt/$kp"
+      # v0.5 overlay: keep stock system_ext image verbatim for Phase D.
+      if [[ "${PORT_MODE:-full}" == "overlay" && "$kp" == "system_ext" ]]; then
+        mkdir -p "$WORK_ROOT/k90_assets/stock_images"
+        cp "$WORK_ROOT/k90_parts/${kp}_a.img" "$WORK_ROOT/k90_assets/stock_images/${kp}_a.img"
+        echo "[K90][overlay] Kept stock ${kp}_a.img ($(du -sh "$WORK_ROOT/k90_assets/stock_images/${kp}_a.img" | awk '{print $1}'))"
+      fi
       rm -f "$WORK_ROOT/k90_parts/${kp}_a.img"
     fi
   done
@@ -840,6 +858,26 @@ sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" verify "$OUT_DIR/system.img" \
 # PHASE D: Patch product.img, passthrough system_ext.img, create empty mi_ext/mi_product
 # ------------------------------------------------------------------------------
 if [[ "$BUILD_SCOPE" == "full" ]]; then
+  # v0.5 overlay: keep product/system_ext/mi_ext/mi_product 100% K90 stock.
+  # Only system.img carries overlaid OriginOS apps; this isolates the variable.
+  if [[ "${PORT_MODE:-full}" == "overlay" ]]; then
+    echo ""
+    echo ">>> [Phase D][overlay] Using K90 STOCK product/system_ext/mi images verbatim..."
+    cp "$WORK_ROOT/k90_assets/stock_images/product_a.img" "$OUT_DIR/product.img"
+    cp "$WORK_ROOT/k90_assets/stock_images/system_ext_a.img" "$OUT_DIR/system_ext.img"
+    # Stock mi_ext/mi_product came from super: extract them here (not in Phase A list)
+    # Fallback: use empty 4K images if stock ones unavailable (kept for compatibility)
+    MI_DIR="$WORK_ROOT/stage/empty_erofs"
+    mkdir -p "$MI_DIR"
+    if [[ -f "$WORK_ROOT/k90_assets/stock_images/mi_ext_a.img" ]]; then
+      cp "$WORK_ROOT/k90_assets/stock_images/mi_ext_a.img" "$OUT_DIR/mi_ext.img"
+      cp "$WORK_ROOT/k90_assets/stock_images/mi_product_a.img" "$OUT_DIR/mi_product.img"
+    else
+      sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/mi_ext.img" "$MI_DIR"
+      sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/mi_product.img" "$MI_DIR"
+    fi
+    echo "[overlay] product/system_ext/mi = K90 stock (not OriginOS)" | tee "$REPORT_DIR/overlay_layers_phase_d.txt"
+  else
   echo ""
   echo ">>> [Phase D] Staging & patching product.img..."
   MNT_PROD="$WORK_ROOT/mnt/neo11_product"
@@ -1087,6 +1125,7 @@ PYEOF
   sudo mkfs.erofs -z"$EROFS_COMPRESS" -T "$EROFS_TIMESTAMP" "$OUT_DIR/mi_product.img" "$EMPTY_DIR"
   sudo rm -rf "$EMPTY_DIR"
   sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" verify "$OUT_DIR/mi_ext.img" --min-selinux-ratio 0.99 | tee "$REPORT_DIR/verify_mi_ext.txt"
+  fi   # end of overlay else branch
 fi
 
 sudo chown -R "$(id -u):$(id -g)" "$OUT_DIR" "$REPORT_DIR"

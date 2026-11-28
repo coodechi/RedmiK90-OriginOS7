@@ -4,19 +4,26 @@
 # One relative path per line (relative to the SAR system partition root).
 # K90 stock system stays as the base; only these paths are overlaid from OriginOS.
 #
-# CONSERVATIVE START (v0.4): only user-facing apps + their resources.
-# Boot-critical paths (bin/init, etc/init, etc/vintf, etc/selinux, framework,
-# lib64, build.prop) are NOT overlaid — they stay K90 stock so the device boots.
+# v0.5 CONSTRAINTS:
+#   Full K90 stock base (system/product/system_ext/mi + kept vendor/odm)
+#   already uses 10.79 GiB of the 12.49 GiB group cap => only ~1.7 GiB left
+#   for overlaid apps. Full OriginOS custom apps are 2.4 GiB, so we take a
+#   curated core subset (~1.4 GiB) to stay inside the cap.
 #
-# If this boots, add layers incrementally (one group at a time) to find what breaks.
 # Lines starting with # or blank are ignored.
 
-# OriginOS system apps (user-facing, safe-ish)
-system/custom/app
-system/custom/priv-app
-
-# OriginOS launcher / gallery / core vivo apps in standard locations
-system/app/VivoGallery
-system/app/VideoPlayer
-system/app/BBKMusic
-system/priv-app/BBKHome
+# Core OriginOS apps (curated to fit ~1.7 GiB headroom)
+system/custom/app/VivoGallery
+system/custom/app/VideoPlayer
+system/custom/app/BBKMusic
+system/custom/app/VivoPhoto
+system/custom/app/BBKNotes
+system/custom/app/IqooSecure
+system/custom/app/BBKWeather
+system/custom/app/BBKTheme
+system/custom/app/VivoCalendar
+system/custom/app/BBKSoundRecorder
+system/custom/app/BBKTimer
+system/custom/app/BBKCalculator
+system/custom/app/Compass
+system/custom/app/SmartRemote
