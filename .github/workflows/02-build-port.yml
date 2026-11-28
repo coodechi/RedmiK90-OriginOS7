@@ -39,13 +39,14 @@ on:
           - selinux
           - none
       port_mode:
-        description: "full = full OriginOS system (v0.2 behavior) | gradual = K90 init layer overlay (v0.3, needs build_scope=full)"
+        description: "full = v0.2 behavior | gradual = v0.3 K90 init overlay | overlay = v0.4 K90 base + OriginOS app layers (needs build_scope=full)"
         type: choice
         required: true
         default: "full"
         options:
           - full
           - gradual
+          - overlay
       upload_to_ms:
         description: "Automatically upload packaged ROM bundle to ModelScope Private Dataset"
         type: boolean

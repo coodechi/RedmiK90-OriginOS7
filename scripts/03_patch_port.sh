@@ -54,11 +54,11 @@ MASK_DEVICE="${MASK_DEVICE:-annibale}"
 #             after v0.2 still bootlooped. Requires build_scope=full (extracts K90 init assets).
 PORT_MODE="${PORT_MODE:-full}"
 case "$PORT_MODE" in
-  full|gradual) ;;
-  *) echo "[FATAL] PORT_MODE must be full|gradual (got '$PORT_MODE')"; exit 1 ;;
+  full|gradual|overlay) ;;
+  *) echo "[FATAL] PORT_MODE must be full|gradual|overlay (got '$PORT_MODE')"; exit 1 ;;
 esac
-if [[ "$PORT_MODE" == "gradual" && "${BUILD_SCOPE:-full}" != "full" ]]; then
-  echo "[FATAL] PORT_MODE=gradual requires BUILD_SCOPE=full (needs K90 init-layer extraction in Phase A)"
+if [[ "$PORT_MODE" != "full" && "${BUILD_SCOPE:-full}" != "full" ]]; then
+  echo "[FATAL] PORT_MODE=$PORT_MODE requires BUILD_SCOPE=full (needs K90 base extraction in Phase A)"
   exit 1
 fi
 
@@ -278,6 +278,15 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
             fi
           done
         fi
+        # Overlay port (v0.4): persist ENTIRE K90 stock system as the boot-safe base.
+        # OriginOS apps/framework are layered on top later, so the whole init/VINTF/
+        # SELinux/framework chain stays 100% K90 and is known to boot on this device.
+        if [[ "${PORT_MODE:-full}" == "overlay" ]]; then
+          sudo rm -rf "$WORK_ROOT/k90_assets/k90_system_base"
+          sudo mkdir -p "$WORK_ROOT/k90_assets/k90_system_base"
+          sudo cp -a "$WORK_ROOT/k90_mnt/$kp/." "$WORK_ROOT/k90_assets/k90_system_base/"
+          echo "[K90][overlay] Persisted full stock system as overlay base ($(sudo du -sh "$WORK_ROOT/k90_assets/k90_system_base" | awk '{print $1}'))"
+        fi
       fi
       if [[ "$kp" == "system_ext" ]]; then
         for sub in vintf selinux; do
@@ -414,9 +423,36 @@ for root in sys.argv[1:]:
 PYEOF
 } > "$REPORT_DIR/vgc_oem_orig_xattrs.txt"
 
-# Lossless copy of entire SAR system partition (preserving UID/GID/mode/SELinux/caps)
+# Lossless copy of system partition (preserving UID/GID/mode/SELinux/caps)
 sudo rm -rf "$STAGE_SYS"
-sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$MNT_SYS" "$STAGE_SYS"
+if [[ "${PORT_MODE:-full}" == "overlay" ]]; then
+  # v0.4: start from K90 stock system (known bootable), then overlay OriginOS app layers.
+  OVERLAY_LOG="$REPORT_DIR/overlay_layers.txt"
+  {
+    echo "=== PORT_MODE=overlay: K90 base + OriginOS layers ==="
+    echo "Base  : K90 stock system (system_a.img from HyperOS 4)"
+    echo "Layers: $REPO_ROOT/config/overlay_layers.txt"
+  } > "$OVERLAY_LOG"
+  sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy \
+    "$WORK_ROOT/k90_assets/k90_system_base" "$STAGE_SYS"
+  while IFS= read -r rel || [[ -n "$rel" ]]; do
+    rel="${rel%%#*}"                       # strip inline comments
+    rel="$(echo "$rel" | xargs)"          # trim whitespace
+    [[ -z "$rel" ]] && continue
+    src="$MNT_SYS/$rel"
+    dst="$STAGE_SYS/$rel"
+    if sudo test -e "$src"; then
+      sudo rm -rf "$dst"
+      sudo mkdir -p "$(dirname "$dst")"
+      sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$src" "$dst"
+      echo "[overlay] + $rel" | tee -a "$OVERLAY_LOG"
+    else
+      echo "[overlay] SKIP (not in OriginOS) $rel" | tee -a "$OVERLAY_LOG"
+    fi
+  done < "$REPO_ROOT/config/overlay_layers.txt"
+else
+  sudo python3 "$REPO_ROOT/scripts/erofs_repack.py" copy "$MNT_SYS" "$STAGE_SYS"
+fi
 
 # Immediately unmount and delete source system.img to reclaim 10 GB disk!
 umount_erofs "$MNT_SYS"
@@ -426,7 +462,13 @@ rm -f "$WORK_ROOT/neo11_parts/system.img"
 echo "[Patch] Applying debloat & conflict removal list ([system])..."
 REMOVED_LOG="$REPORT_DIR/removed_items.txt"
 : > "$REMOVED_LOG"
-apply_remove_list "system" "$STAGE_SYS" "$REMOVED_LOG"
+if [[ "${PORT_MODE:-full}" == "overlay" ]]; then
+  # Overlay mode: removing entries from remove_list.txt would delete the very
+  # OriginOS apps we just layered on. Keep the K90 base + overlaid layers intact.
+  echo "[overlay] Skipping [system] debloat to preserve overlaid OriginOS apps" | tee -a "$REMOVED_LOG"
+else
+  apply_remove_list "system" "$STAGE_SYS" "$REMOVED_LOG"
+fi
 
 # --- C2. Populate /vgc inside SAR system root ---
 echo "[Patch] Injecting Neo 11 /vgc into SAR system root (selinux=u:object_r:system_file:s0)..."

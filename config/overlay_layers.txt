@@ -1,0 +1,22 @@
+# ==============================================================================
+# PORT_MODE=overlay — OriginOS layers to copy onto K90 stock system base
+# ==============================================================================
+# One relative path per line (relative to the SAR system partition root).
+# K90 stock system stays as the base; only these paths are overlaid from OriginOS.
+#
+# CONSERVATIVE START (v0.4): only user-facing apps + their resources.
+# Boot-critical paths (bin/init, etc/init, etc/vintf, etc/selinux, framework,
+# lib64, build.prop) are NOT overlaid — they stay K90 stock so the device boots.
+#
+# If this boots, add layers incrementally (one group at a time) to find what breaks.
+# Lines starting with # or blank are ignored.
+
+# OriginOS system apps (user-facing, safe-ish)
+system/custom/app
+system/custom/priv-app
+
+# OriginOS launcher / gallery / core vivo apps in standard locations
+system/app/VivoGallery
+system/app/VideoPlayer
+system/app/BBKMusic
+system/priv-app/BBKHome
