@@ -47,6 +47,21 @@ esac
 # annibale | none  —— 把 product/build.prop 的 ro.product.product.* 伪装成 K90
 MASK_DEVICE="${MASK_DEVICE:-annibale}"
 
+# PORT_MODE (v0.3): full | gradual
+#   full    = v0.2 behavior: full OriginOS system with only VINTF/SELinux aligned.
+#   gradual = keep OriginOS apps/framework but restore K90's boot-critical init layer
+#             (/system/bin/init + /system/etc/init), which is the remaining suspect
+#             after v0.2 still bootlooped. Requires build_scope=full (extracts K90 init assets).
+PORT_MODE="${PORT_MODE:-full}"
+case "$PORT_MODE" in
+  full|gradual) ;;
+  *) echo "[FATAL] PORT_MODE must be full|gradual (got '$PORT_MODE')"; exit 1 ;;
+esac
+if [[ "$PORT_MODE" == "gradual" && "${BUILD_SCOPE:-full}" != "full" ]]; then
+  echo "[FATAL] PORT_MODE=gradual requires BUILD_SCOPE=full (needs K90 init-layer extraction in Phase A)"
+  exit 1
+fi
+
 if ! mkdir -p "$WORK_ROOT" "$REPORT_DIR" "$OUT_DIR" 2>/dev/null; then
   echo "[FATAL] 无法创建 WORK_ROOT / REPORT_DIR / OUT_DIR："
   echo "        WORK_ROOT=$WORK_ROOT"
@@ -247,6 +262,22 @@ if [[ "$BUILD_SCOPE" == "full" ]]; then
             echo "[WARN] K90 stock system/etc/$sub not found — base alignment may be incomplete"
           fi
         done
+        # Gradual port: persist K90 stock init layer (the boot-critical part).
+        # v0.2 proved full OriginOS system.img bootloops even with stock VINTF/SELinux;
+        # the remaining suspect is framework init (/system/bin/init, /system/etc/init).
+        if [[ "${PORT_MODE:-full}" == "gradual" ]]; then
+          mkdir -p "$WORK_ROOT/k90_assets/init_layer"
+          for rel in "system/etc/init" "system/etc/init/hw" "system/bin/init" \
+                     "system/etc/prop.default" "system/etc/init.environ.rc"; do
+            src="$WORK_ROOT/k90_mnt/$kp/$rel"
+            dst="$WORK_ROOT/k90_assets/init_layer/$rel"
+            if sudo test -e "$src"; then
+              sudo mkdir -p "$(dirname "$dst")"
+              sudo cp -a "$src" "$dst"
+              echo "[K90][gradual] Persisted $rel for init-layer replacement"
+            fi
+          done
+        fi
       fi
       if [[ "$kp" == "system_ext" ]]; then
         for sub in vintf selinux; do
@@ -711,6 +742,35 @@ if [[ "$ALIGN_K90_SELINUX" == "true" ]]; then
   fi
 fi
 
+# --- C4.7 GRADUAL PORT: replace OriginOS init layer with K90 stock ---
+# Rationale: v0.2 aligned VINTF/SELinux but still bootlooped. The remaining
+# boot-critical layer is /system/bin/init (second-stage init) and /system/etc/init/*.rc.
+# OriginOS init.rc starts vivo-only services (securemount, vsp, camera HALs) that
+# reference files/HALs absent on K90 vendor; those can kill boot before adb.
+# PORT_MODE=gradual keeps OriginOS apps/framework but restores K90's init layer.
+GRADUAL_LOG="$REPORT_DIR/gradual_port.txt"
+if [[ "${PORT_MODE:-full}" == "gradual" ]]; then
+  echo "=== GRADUAL PORT: K90 init layer overlay ===" | tee "$GRADUAL_LOG"
+  if sudo test -d "$WORK_ROOT/k90_assets/init_layer/system"; then
+    SRC="$WORK_ROOT/k90_assets/init_layer/system"
+    # init binaries & rc scripts
+    for rel in etc/init etc/init/hw bin/init etc/init.environ.rc etc/prop.default; do
+      if sudo test -e "$SRC/$rel"; then
+        sudo rm -rf "$STAGE_SYS/system/$rel"
+        sudo mkdir -p "$(dirname "$STAGE_SYS/system/$rel")"
+        sudo cp -a "$SRC/$rel" "$STAGE_SYS/system/$rel"
+        echo "[gradual] system/$rel <- K90 stock" | tee -a "$GRADUAL_LOG"
+      fi
+    done
+  else
+    echo "[FATAL] PORT_MODE=gradual but k90_assets/init_layer/system missing." | tee -a "$GRADUAL_LOG"
+    echo "        Requires build_scope=full to extract K90 init layer." | tee -a "$GRADUAL_LOG"
+    exit 1
+  fi
+else
+  echo "PORT_MODE=${PORT_MODE:-full} (gradual init-layer overlay disabled)" > "$GRADUAL_LOG"
+fi
+
 # Save final patched props snapshot to report
 sudo cp "$STAGE_SYS/system/build.prop" "$REPORT_DIR/patched_system_build.prop"
 sudo cp "$STAGE_SYS/oem/oem.prop" "$REPORT_DIR/patched_oem.prop"
@@ -1061,6 +1121,7 @@ Base ROM      : REDMI K90 HyperOS 4 (OS4.0.6.0.XPKCNXM / Android 17 / Vendor API
 Port ROM      : iQOO Neo 11 OriginOS 7 (PD2520_A_17.1.15.2.W10.V000L1 / Android 17)
 OEM Variant   : ${OEM_VARIANT_NAME:-$VIVO_OEM_VARIANT} (configured: $VIVO_OEM_VARIANT)
 K90 Align     : $ALIGN_K90_BASE (vintf=$ALIGN_K90_VINTF selinux=$ALIGN_K90_SELINUX)
+Port Mode     : $PORT_MODE
 Device Mask   : $MASK_DEVICE
 EOF
 cat "$REPORT_DIR/capacity_summary.txt" >> "$OUT_DIR/BUILD_INFO.txt"
@@ -1195,7 +1256,7 @@ if [[ -f vbmeta.img && -f vbmeta_system.img ]]; then
   fastboot reboot bootloader
   sleep 4
   fastboot --disable-verity flash "vbmeta_${SLOT}" vbmeta.img
-  fastboot flash "vbmeta_system_${SLOT}" vbmeta_system.img
+  fastboot --disable-verity flash "vbmeta_system_${SLOT}" vbmeta_system.img
   fastboot set_active "${SLOT}"
 else
   echo ""
